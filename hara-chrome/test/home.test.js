@@ -25,7 +25,8 @@ test("nsToPath follows the hara project convention", () => {
   assert.equal(nsToPath("my-app.deep.lib-name"), "my_app/deep/lib_name.hal");
 });
 
-test("parseSourcePaths reads project.hal or defaults", () => {
+test("parseSourcePaths reads project.edn, legacy project.hal, or defaults", () => {
+  assert.deepEqual(parseSourcePaths('{:project/source-paths ["src" "lib"]}'), ["src", "lib"]);
   assert.deepEqual(parseSourcePaths('(defproject demo {:source-paths ["src" "lib"]})'), ["src", "lib"]);
   assert.deepEqual(parseSourcePaths("(defproject demo {})"), ["."]);
 });

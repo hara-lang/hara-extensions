@@ -30,7 +30,7 @@ const moduleBytes = new Uint8Array(
 // Registered into every kernel at boot: the studio hal libs plus the
 // chrome.api bindings.
 const resources = { "chrome.api": await fetchText("src/hara/api.hal") };
-for (const name of ["store", "fs", "space", "boot"]) {
+for (const name of ["store", "fs", "space", "boot", "node", "draw"]) {
   resources[`studio.${name}`] = await fetchText(`vendor/studio/hal/${name}.hal`);
 }
 
@@ -70,12 +70,15 @@ async function setHome(dir) {
   homeLabel.textContent = dir ? `home: ${dir.name}` : "no home";
   homeSourcePaths = ["."];
   if (dir) {
-    try {
-      const projectHal = await (
-        await (await dir.getFileHandle("project.hal")).getFile()
-      ).text();
-      homeSourcePaths = parseSourcePaths(projectHal);
-    } catch { /* no project.hal — default paths */ }
+    for (const descriptor of ["project.edn", "project.hal"]) {
+      try {
+        const projectSource = await (
+          await (await dir.getFileHandle(descriptor)).getFile()
+        ).text();
+        homeSourcePaths = parseSourcePaths(projectSource);
+        break;
+      } catch { /* try the migration fallback */ }
+    }
   }
 }
 

@@ -28,8 +28,8 @@ export function nsToPath(ns) {
   return `${ns.replaceAll(".", "/").replaceAll("-", "_")}.hal`;
 }
 
-export function parseSourcePaths(projectHal) {
-  const match = /:source-paths\s*\[([^\]]*)\]/.exec(projectHal);
+export function parseSourcePaths(projectSource) {
+  const match = /:(?:project\/)?source-paths\s*\[([^\]]*)\]/.exec(projectSource);
   if (!match) return ["."];
   const paths = [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
   return paths.length > 0 ? paths : ["."];

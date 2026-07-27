@@ -69,8 +69,8 @@
     (unwind-protect
         (progn
           (make-directory nested t)
-          (with-temp-file (expand-file-name "project.hal" root)
-            (insert "(defproject test {})"))
+          (with-temp-file (expand-file-name "project.edn" root)
+            (insert "{:hara/type :project :project/id test}"))
           (let ((default-directory nested))
             (should (equal (hara--project-root)
                            (file-name-as-directory (file-truename root)))))
