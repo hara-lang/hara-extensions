@@ -2,6 +2,8 @@ import { createBrowserBroker } from "../vendor/studio/broker.js";
 import { createHostServices } from "../vendor/studio/host-services.js";
 import { GraphHost } from "../vendor/studio/graph-host.js";
 import { SessionRouter } from "../vendor/studio/session-router.js";
+import { CapabilityRegistry } from "../vendor/studio/capability-registry.js";
+import { createClockCapability } from "../vendor/studio/capabilities/clock.js";
 import { mountStudio } from "../vendor/studio/ui.js";
 import { createHostCalls, mergeHostCalls } from "./host-bridge.js";
 import { preloadRequires, parseSourcePaths, chooseHome, restoreHome } from "./home.js";
@@ -24,9 +26,12 @@ async function fetchText(path) {
 // to the background service worker over the port.
 const port = chrome.runtime.connect({ name: "hara-host" });
 const sessionRouter = new SessionRouter();
+const capabilityRegistry = new CapabilityRegistry({ adapters: {
+  "clock/frame": createClockCapability()
+} });
 const graphHost = new GraphHost({
   workerUrl: asset("vendor/studio/program-worker.js"),
-  sessionRouter
+  sessionRouter, capabilityRegistry
 });
 const hostCalls = mergeHostCalls(createHostServices({
   graphHost,

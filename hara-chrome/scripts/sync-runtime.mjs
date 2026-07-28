@@ -30,6 +30,7 @@ for (const [from, to] of files) {
 const studio = path.join(repo, "rust/web/studio");
 for (const [sub, filter] of [
   ["", (name) => name.endsWith(".js") || name.endsWith(".css")],
+  ["capabilities", (name) => name.endsWith(".js")],
   ["hal", (name) => name.endsWith(".hal")],
 ]) {
   const out = path.join(vendor, "studio", sub);
