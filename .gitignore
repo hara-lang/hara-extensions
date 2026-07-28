@@ -1,6 +1,5 @@
 # Local JavaScript installs
 hara-chrome/node_modules/
-hara-chrome/ui/hara-ui/
 
 # Local desktop metadata
 .DS_Store
