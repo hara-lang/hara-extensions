@@ -1,0 +1,5 @@
+# Local JavaScript installs
+hara-chrome/node_modules/
+
+# Local desktop metadata
+.DS_Store
