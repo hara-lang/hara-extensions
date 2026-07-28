@@ -40,3 +40,13 @@ for (const [sub, filter] of [
     console.log(`synced studio/${sub ? `${sub}/` : ""}${name}`);
   }
 }
+
+// UI primitives are a versioned package, not panel-local styling. Chrome
+// stages the same files that the website and browser Studio receive.
+const ui = path.join(repo, "website/vendor/hara-ui");
+const uiOut = path.join(vendor, "ui");
+mkdirSync(uiOut, { recursive: true });
+for (const name of ["tokens.css", "components.css", "studio.css"]) {
+  copyFileSync(path.join(ui, name), path.join(uiOut, name));
+  console.log(`synced ui/${name}`);
+}
