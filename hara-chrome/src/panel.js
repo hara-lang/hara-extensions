@@ -1,5 +1,9 @@
 import { createBrowserBroker } from "../vendor/studio/broker.js";
 import { createHostServices } from "../vendor/studio/host-services.js";
+import { GraphHost } from "../vendor/studio/graph-host.js";
+import { SessionRouter } from "../vendor/studio/session-router.js";
+import { CapabilityRegistry } from "../vendor/studio/capability-registry.js";
+import { createClockCapability } from "../vendor/studio/capabilities/clock.js";
 import { mountStudio } from "../vendor/studio/ui.js";
 import { createHostCalls, mergeHostCalls } from "./host-bridge.js";
 import { preloadRequires, parseSourcePaths, chooseHome, restoreHome } from "./home.js";
@@ -21,7 +25,18 @@ async function fetchText(path) {
 // their keys; every other service/method (chrome.*, hara/echo) falls through
 // to the background service worker over the port.
 const port = chrome.runtime.connect({ name: "hara-host" });
-const hostCalls = mergeHostCalls(createHostServices(), createHostCalls(port));
+const sessionRouter = new SessionRouter();
+const capabilityRegistry = new CapabilityRegistry({ adapters: {
+  "clock/frame": createClockCapability()
+} });
+const graphHost = new GraphHost({
+  workerUrl: asset("vendor/studio/program-worker.js"),
+  sessionRouter, capabilityRegistry
+});
+const hostCalls = mergeHostCalls(createHostServices({
+  graphHost,
+  graphHostOptions: { sessionRouter }
+}), createHostCalls(port));
 
 const moduleBytes = new Uint8Array(
   await (await fetch(asset("vendor/hara.wasm"))).arrayBuffer(),
@@ -30,7 +45,7 @@ const moduleBytes = new Uint8Array(
 // Registered into every kernel at boot: the studio hal libs plus the
 // chrome.api bindings.
 const resources = { "chrome.api": await fetchText("src/hara/api.hal") };
-for (const name of ["store", "fs", "space", "boot"]) {
+for (const name of ["store", "fs", "space", "boot", "node", "draw", "program", "graph", "session"]) {
   resources[`studio.${name}`] = await fetchText(`vendor/studio/hal/${name}.hal`);
 }
 
@@ -39,6 +54,10 @@ const broker = createBrowserBroker({
   moduleBytes,
   hostCalls,
   resources,
+  onKernelCreated: async (kernel) => sessionRouter.register(kernel.name, kernel.context, {
+    onRelease: (sessionId) => graphHost.releaseSession(sessionId)
+  }),
+  onKernelClosed: (kernel) => sessionRouter.unregister(kernel.name)
 });
 const studio = mountStudio(document.getElementById("hara-studio-mount"), { broker });
 
@@ -70,12 +89,15 @@ async function setHome(dir) {
   homeLabel.textContent = dir ? `home: ${dir.name}` : "no home";
   homeSourcePaths = ["."];
   if (dir) {
-    try {
-      const projectHal = await (
-        await (await dir.getFileHandle("project.hal")).getFile()
-      ).text();
-      homeSourcePaths = parseSourcePaths(projectHal);
-    } catch { /* no project.hal — default paths */ }
+    for (const descriptor of ["project.edn", "project.hal"]) {
+      try {
+        const projectSource = await (
+          await (await dir.getFileHandle(descriptor)).getFile()
+        ).text();
+        homeSourcePaths = parseSourcePaths(projectSource);
+        break;
+      } catch { /* try the migration fallback */ }
+    }
   }
 }
 

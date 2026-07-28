@@ -290,18 +290,26 @@ Return (VALUE . NEXT-OFFSET), or signal `hara-resp-incomplete'."
 (defun hara--project-root ()
   (file-name-as-directory
    (file-truename
-    (or (locate-dominating-file default-directory "project.hal")
+    (or (locate-dominating-file
+         default-directory
+         (lambda (directory)
+           (or (file-exists-p (expand-file-name "project.edn" directory))
+               (file-exists-p (expand-file-name "project.hal" directory)))))
         (when-let ((project (project-current nil)))
           (project-root project))
         default-directory))))
 
 (defun hara--project-file-root ()
-  "Return the nearest project.hal root for the current local file."
+  "Return the nearest project.edn or legacy project.hal root."
   (when (and buffer-file-name
              (not (file-remote-p buffer-file-name)))
     (when-let ((root (locate-dominating-file
                       (file-name-directory buffer-file-name)
-                      "project.hal")))
+                      (lambda (directory)
+                        (or (file-exists-p
+                             (expand-file-name "project.edn" directory))
+                            (file-exists-p
+                             (expand-file-name "project.hal" directory)))))))
       (file-name-as-directory (file-truename root)))))
 
 (defun hara--auto-jack-in ()
@@ -1078,6 +1086,8 @@ so a partial name is never evaluated."
 
 ;;;###autoload
 (with-eval-after-load 'projectile
+  (add-to-list 'projectile-project-root-files "project.edn")
+  (add-to-list 'projectile-project-root-files-bottom-up "project.edn")
   (add-to-list 'projectile-project-root-files "project.hal")
   (add-to-list 'projectile-project-root-files-bottom-up "project.hal")
   (projectile-register-project-type

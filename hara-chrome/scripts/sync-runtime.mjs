@@ -30,6 +30,7 @@ for (const [from, to] of files) {
 const studio = path.join(repo, "rust/web/studio");
 for (const [sub, filter] of [
   ["", (name) => name.endsWith(".js") || name.endsWith(".css")],
+  ["capabilities", (name) => name.endsWith(".js")],
   ["hal", (name) => name.endsWith(".hal")],
 ]) {
   const out = path.join(vendor, "studio", sub);
@@ -38,4 +39,14 @@ for (const [sub, filter] of [
     copyFileSync(path.join(studio, sub, name), path.join(out, name));
     console.log(`synced studio/${sub ? `${sub}/` : ""}${name}`);
   }
+}
+
+// UI primitives are a versioned package, not panel-local styling. Chrome
+// stages the same files that the website and browser Studio receive.
+const ui = path.join(repo, "website/vendor/hara-ui");
+const uiOut = path.join(vendor, "ui");
+mkdirSync(uiOut, { recursive: true });
+for (const name of ["tokens.css", "components.css", "studio.css", "studio-shell.js"]) {
+  copyFileSync(path.join(ui, name), path.join(uiOut, name));
+  console.log(`synced ui/${name}`);
 }
