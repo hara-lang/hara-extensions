@@ -46,7 +46,7 @@ for (const [sub, filter] of [
 const ui = path.join(repo, "website/vendor/hara-ui");
 const uiOut = path.join(vendor, "ui");
 mkdirSync(uiOut, { recursive: true });
-for (const name of ["tokens.css", "components.css", "studio.css"]) {
+for (const name of ["tokens.css", "components.css", "studio.css", "studio-shell.js"]) {
   copyFileSync(path.join(ui, name), path.join(uiOut, name));
   console.log(`synced ui/${name}`);
 }
