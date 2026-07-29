@@ -37,7 +37,7 @@ The panel can load `.hal` sources from a local directory:
 
 - "choose home" picks a directory (persisted in IndexedDB; restored on load
   when permission is still granted).
-- A `project.hal` in that directory supplies `:source-paths` (defaults to `["."]`),
+- A `project.edn` in that directory supplies `:project/source-paths` (defaults to `["."]`),
   which is where `require`d namespaces are resolved from.
 - "run .hal file" evaluates a single file from the home directory.
 

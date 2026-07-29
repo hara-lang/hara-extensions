@@ -6,7 +6,7 @@ const FAKE_HOME = `
     name: "fake-home",
     async getFileHandle(name) {
       const files = {
-        "project.hal": '(defproject demo {:source-paths ["src"]})',
+        "project.edn": '{:hara/type :project :project/id demo :project/source-paths ["src"]}',
       };
       if (name in files) return { async getFile() { return { async text() { return files[name]; } }; } };
       throw new Error("NotFound: " + name);

@@ -89,14 +89,14 @@ async function setHome(dir) {
   homeLabel.textContent = dir ? `home: ${dir.name}` : "no home";
   homeSourcePaths = ["."];
   if (dir) {
-    for (const descriptor of ["project.edn", "project.hal"]) {
+    for (const descriptor of ["project.edn"]) {
       try {
         const projectSource = await (
           await (await dir.getFileHandle(descriptor)).getFile()
         ).text();
         homeSourcePaths = parseSourcePaths(projectSource);
         break;
-      } catch { /* try the migration fallback */ }
+      } catch { /* use the default source path */ }
     }
   }
 }

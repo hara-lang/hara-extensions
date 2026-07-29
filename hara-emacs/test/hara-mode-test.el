@@ -98,8 +98,8 @@
     (unwind-protect
         (progn
           (make-directory source-directory)
-          (with-temp-file (expand-file-name "project.hal" root)
-            (insert "(defproject auto {})"))
+          (with-temp-file (expand-file-name "project.edn" root)
+            (insert "{:hara/type :project :project/id auto}"))
           (with-temp-buffer
             (setq-local buffer-file-name source-file)
             (cl-letf (((symbol-function 'run-at-time)

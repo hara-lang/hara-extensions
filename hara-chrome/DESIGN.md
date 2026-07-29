@@ -131,7 +131,7 @@ chrome-hara bridge (node): RESP TCP server ⟷ WS ⟷ extension
   HTA target; the panel registers `src/hara/api.hal` at startup.
 - Home directory: `showDirectoryPicker()` + a require preloader that
   resolves `ns.name` → `<home>/<source-path>/ns/name.hal` (`-` → `_`,
-  `project.hal` `:source-paths`, mirroring the JVM `HaraProject`
+  `project.edn` `:project/source-paths`, mirroring the JVM `HaraProject`
   convention) and registers sources before eval.
 - RESP: MV3 extensions cannot listen on TCP, so `bridge/resp-bridge.mjs`
   (node) bridges RESP2 TCP ⟷ WebSocket; the panel dials the WS outbound.

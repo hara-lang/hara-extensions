@@ -8,7 +8,7 @@ Status: **placeholder** — no implementation yet.
 
 A single language server that editor clients talk to over LSP, so
 language smarts (diagnostics, completion, hover, go-to-definition,
-project-aware namespace loading via `project.hal`) live in one place
+project-aware namespace loading via `project.edn`) live in one place
 instead of being re-implemented per editor.
 
 Planned clients:
