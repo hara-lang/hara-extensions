@@ -45,7 +45,7 @@ const moduleBytes = new Uint8Array(
 // Registered into every kernel at boot: the studio hal libs plus the
 // chrome.api bindings.
 const resources = { "chrome.api": await fetchText("src/hara/api.hal") };
-for (const name of ["store", "fs", "space", "boot", "node", "draw", "program", "graph", "session"]) {
+for (const name of ["store", "boot", "node", "draw", "program", "graph", "session"]) {
   resources[`studio.${name}`] = await fetchText(`vendor/studio/hal/${name}.hal`);
 }
 
@@ -54,6 +54,10 @@ const broker = createBrowserBroker({
   moduleBytes,
   hostCalls,
   resources,
+  onKernelStarting: async (kernel) => {
+    const mount = await kernel.context.createFilesystem({ provider: "indexeddb", key: "hara-chrome" });
+    await kernel.context.session().attachFilesystem(mount);
+  },
   onKernelCreated: async (kernel) => sessionRouter.register(kernel.name, kernel.context, {
     onRelease: (sessionId) => graphHost.releaseSession(sessionId)
   }),
