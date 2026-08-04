@@ -1,128 +1,80 @@
 import net from "node:net";
 import { WebSocketServer } from "ws";
+import { createProtocolSession, createRespParser, encodeResp, RespError } from "./protocol.mjs";
 
-class ProtocolError extends Error {}
-
-const MAX_ARGS = 1024;
-const MAX_BULK = 64 * 1024 * 1024;
-
-/** Minimal RESP2 reader: arrays of bulk/simple strings only. */
-function createRespParser(onCommand, onProtocolError) {
-  let buffer = Buffer.alloc(0);
-  let tail = Promise.resolve();
-  return (chunk) => {
-    buffer = Buffer.concat([buffer, chunk]);
-    // Serialize command handling: an async command (EVAL) must finish
-    // replying before the next command (e.g. QUIT) touches the socket.
-    tail = tail.then(async () => {
-      for (;;) {
-        let command;
-        try {
-          command = readCommand(buffer);
-        } catch (error) {
-          if (error instanceof ProtocolError) return onProtocolError();
-          throw error;
-        }
-        if (!command) return;
-        buffer = buffer.subarray(command.consumed);
-        await onCommand(command.args);
-      }
-    });
-  };
-}
-
-function readCommand(buffer) {
-  if (buffer.length === 0 || buffer[0] !== 0x2a /* * */) return null;
-  const lineEnd = buffer.indexOf("\r\n");
-  if (lineEnd === -1) return null;
-  const count = Number(buffer.subarray(1, lineEnd).toString());
-  if (!Number.isInteger(count) || count < 0 || count > MAX_ARGS) throw new ProtocolError();
-  const args = [];
-  let cursor = lineEnd + 2;
-  for (let i = 0; i < count; i++) {
-    if (buffer[cursor] !== 0x24 /* $ */) return null;
-    const sizeEnd = buffer.indexOf("\r\n", cursor);
-    if (sizeEnd === -1) return null;
-    const size = Number(buffer.subarray(cursor + 1, sizeEnd).toString());
-    if (!Number.isInteger(size) || size < 0 || size > MAX_BULK) throw new ProtocolError();
-    if (buffer.length < sizeEnd + 2 + size + 2) return null;
-    args.push(buffer.subarray(sizeEnd + 2, sizeEnd + 2 + size).toString());
-    cursor = sizeEnd + 2 + size + 2;
-  }
-  return { args, consumed: cursor };
-}
-
-export async function startBridge({ respPort = 7355, wsPort = 7356 }) {
+export async function startBridge({ respPort = 7355, wsPort = 7356, token = process.env.HARA_BRIDGE_TOKEN ?? null } = {}) {
   let extension = null;
   const pending = new Map();
   let next = 1;
 
+  const rejectPending = (message) => {
+    for (const entry of pending.values()) entry.reject(new Error(message));
+    pending.clear();
+  };
+
   const wss = new WebSocketServer({ port: wsPort, host: "127.0.0.1" });
-  wss.on("connection", (socket) => {
+  wss.on("connection", (socket, request) => {
+    const url = new URL(request.url ?? "/", "ws://127.0.0.1");
+    if (token && url.searchParams.get("token") !== token) {
+      socket.close(1008, "invalid token");
+      return;
+    }
+    extension?.terminate?.();
     extension = socket;
     socket.on("message", (raw) => {
-      const { id, ok, value, error } = JSON.parse(raw);
-      const entry = pending.get(id);
+      let message;
+      try { message = JSON.parse(raw); } catch { return; }
+      const entry = pending.get(message.id);
       if (!entry) return;
-      pending.delete(id);
-      ok ? entry.resolve(value) : entry.reject(new Error(error ?? "eval failed"));
+      pending.delete(message.id);
+      message.ok ? entry.resolve(message.value) : entry.reject(new Error(message.error ?? "browser request failed"));
     });
     socket.on("close", () => {
-      if (extension === socket) extension = null;
+      if (extension === socket) {
+        extension = null;
+        rejectPending("hara extension disconnected");
+      }
     });
   });
 
-  const evalInExtension = (source) =>
-    new Promise((resolve, reject) => {
-      if (!extension) {
-        reject(new Error("hara extension not connected"));
-        return;
-      }
-      const id = next++;
-      pending.set(id, { resolve, reject });
-      extension.send(JSON.stringify({ id, source }));
-    });
+  const requestExtension = (op, payload = {}) => new Promise((resolve, reject) => {
+    if (!extension || extension.readyState !== 1) {
+      reject(new Error("hara extension not connected"));
+      return;
+    }
+    const id = next++;
+    pending.set(id, { resolve, reject });
+    extension.send(JSON.stringify({ id, op, ...payload }));
+  });
 
-  // allowHalfOpen: clients may send their commands and FIN in one write
-  // (socket.end(payload)); replies must still be writable afterwards.
+  let connectionCounter = 0;
   const server = net.createServer({ allowHalfOpen: true }, (socket) => {
-    const write = {
-      simple: (s) => socket.write(`+${s}\r\n`),
-      error: (s) => socket.write(`-ERR ${s}\r\n`),
-      bulk: (s) => socket.write(`$${Buffer.byteLength(s)}\r\n${s}\r\n`),
+    const session = createProtocolSession({
+      request: requestExtension,
+      connectionId: `chrome-${(++connectionCounter).toString(36)}`,
+    });
+    const writeFrames = ({ frames = [], close = false }) => {
+      for (const frame of frames) socket.write(encodeResp(frame));
+      if (close) socket.end();
     };
-    socket.on(
-      "data",
-      createRespParser(
-        async (args) => {
-          const command = (args[0] ?? "").toUpperCase();
-          try {
-            switch (command) {
-              case "PING": write.simple("PONG"); break;
-              case "HELLO": write.simple("OK"); break;
-              case "INFO": write.bulk("chrome-hara resp bridge (subset: PING HELLO EVAL INFO QUIT)"); break;
-              case "EVAL": write.bulk(String(await evalInExtension(args[1] ?? ""))); break;
-              case "QUIT": write.simple("OK"); socket.end(); break;
-              default: write.error(`unknown command: ${command}`);
-            }
-          } catch (error) {
-            write.error(String(error?.message ?? error));
-          }
-        },
-        // Malformed lengths (NaN/negative/absurd) would otherwise loop the
-        // parser forever; end the connection after reporting the error.
-        () => socket.end("-ERR Protocol error\r\n"),
-      ),
-    );
+    socket.on("data", createRespParser(
+      async (args) => writeFrames(await session.handle(args)),
+      () => socket.end(encodeResp(new RespError("Protocol error"))),
+    ));
+    socket.on("error", () => {});
   });
 
   await Promise.all([
     new Promise((resolve) => server.listen(respPort, "127.0.0.1", resolve)),
     new Promise((resolve) => wss.on("listening", resolve)),
   ]);
+  const respAddress = server.address();
+  const wsAddress = wss.address();
   return {
+    respPort: typeof respAddress === "object" ? respAddress.port : respPort,
+    wsPort: typeof wsAddress === "object" ? wsAddress.port : wsPort,
     close: () => {
-      // ws does not close existing connections; terminate them so close() resolves.
+      rejectPending("bridge closed");
       for (const client of wss.clients) client.terminate();
       return Promise.all([
         new Promise((resolve) => server.close(resolve)),
@@ -135,6 +87,8 @@ export async function startBridge({ respPort = 7355, wsPort = 7356 }) {
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   const respPort = Number(process.argv[2] ?? 7355);
   const wsPort = Number(process.argv[3] ?? 7356);
-  await startBridge({ respPort, wsPort });
-  console.log(`chrome-hara resp bridge: resp=127.0.0.1:${respPort} ws=127.0.0.1:${wsPort}`);
+  const token = process.argv[4] ?? process.env.HARA_BRIDGE_TOKEN ?? null;
+  const bridge = await startBridge({ respPort, wsPort, token });
+  const tokenNote = token ? " token=required" : "";
+  console.log(`hara-chrome bridge: resp=127.0.0.1:${bridge.respPort} ws=127.0.0.1:${bridge.wsPort}${tokenNote}`);
 }
