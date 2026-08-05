@@ -1,6 +1,6 @@
 {
   "name": "vscode-hara",
-  "license": "EPL-2.0",
+  "license": "Apache-2.0",
   "displayName": "Hara Language Support",
   "description": "Connects to Hara Server via Redis Protocol",
   "version": "0.0.1",
