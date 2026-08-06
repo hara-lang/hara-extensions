@@ -1,3 +1,3 @@
-[submodule "hara-chrome/ui/hara-ui"]
-	path = hara-chrome/ui/hara-ui
+[submodule "greenways-os/ui/hara-ui"]
+	path = greenways-os/ui/hara-ui
 	url = https://github.com/hara-lang/hara-ui.git

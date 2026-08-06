@@ -31,16 +31,16 @@ HARA_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../..
 LOCAL_BIN := $(HOME)/.local/bin
 LOCAL_SHARE := $(HOME)/.local/share/hara-mode
 
-TRUFFLE_JAR_SRC := $(HARA_ROOT)/java/target/hara-truffle.jar
+TRUFFLE_JAR_SRC := $(HARA_ROOT)/core/java/target/hara-truffle.jar
 TRUFFLE_JAR_DST := $(LOCAL_SHARE)/hara-truffle.jar
-NATIVE_SRC := $(HARA_ROOT)/target/hara-truffle
-RUST_SRC := $(HARA_ROOT)/rust/target/release/hara
+NATIVE_SRC := $(HARA_ROOT)/core/target/hara-truffle
+RUST_SRC := $(HARA_ROOT)/core/rust/target/release/hara
 
 bin-build: bin-build-truffle
 bin-install: bin-install-truffle
 
 bin-build-truffle:
-	mvn -f "$(HARA_ROOT)/java/pom.xml" -Ptruffle -DskipTests package
+	mvn -f "$(HARA_ROOT)/core/java/pom.xml" -Ptruffle -DskipTests package
 
 bin-install-truffle: bin-build-truffle
 	mkdir -p "$(LOCAL_BIN)" "$(LOCAL_SHARE)"
@@ -51,14 +51,14 @@ bin-install-truffle: bin-build-truffle
 	chmod 755 "$(LOCAL_BIN)/hara-truffle"
 
 bin-build-native:
-	bash "$(HARA_ROOT)/scripts/build-truffle-native"
+	bash "$(HARA_ROOT)/packaging/scripts/build-truffle-native"
 
 bin-install-native: bin-build-native
 	mkdir -p "$(LOCAL_BIN)"
 	install -m 755 "$(NATIVE_SRC)" "$(LOCAL_BIN)/hara-native"
 
 bin-build-rust:
-	cargo build --release --manifest-path "$(HARA_ROOT)/rust/Cargo.toml"
+	cargo build --release --manifest-path "$(HARA_ROOT)/core/rust/Cargo.toml"
 
 bin-install-rust: bin-build-rust
 	mkdir -p "$(LOCAL_BIN)"

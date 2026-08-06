@@ -17,8 +17,8 @@ diag() {
 
 if [ "$BACKEND" = "truffle" ]; then
     if [ -z "$HARA_RUNTIME_JAR" ]; then
-        if [ -r "$REPO_ROOT/java/target/hara-truffle.jar" ]; then
-            HARA_RUNTIME_JAR="$REPO_ROOT/java/target/hara-truffle.jar"
+        if [ -r "$REPO_ROOT/core/java/target/hara-truffle.jar" ]; then
+            HARA_RUNTIME_JAR="$REPO_ROOT/core/java/target/hara-truffle.jar"
             diag "using repo Truffle jar: $HARA_RUNTIME_JAR"
         else
             HARA_RUNTIME_JAR="${HOME}/.local/share/hara-mode/hara-truffle.jar"
@@ -35,12 +35,12 @@ if [ "$BACKEND" = "truffle" ]; then
     exec java -jar "$HARA_RUNTIME_JAR" "$@"
 fi
 
-if [ -x "$REPO_ROOT/target/hara-truffle" ] && [ "$BACKEND" = "native" ]; then
-    diag "using repo native binary: $REPO_ROOT/target/hara-truffle"
-    exec "$REPO_ROOT/target/hara-truffle" "$@"
-elif [ -x "$REPO_ROOT/rust/target/release/hara" ] && [ "$BACKEND" = "rust" ]; then
-    diag "using repo rust binary: $REPO_ROOT/rust/target/release/hara"
-    exec "$REPO_ROOT/rust/target/release/hara" "$@"
+if [ -x "$REPO_ROOT/core/target/hara-truffle" ] && [ "$BACKEND" = "native" ]; then
+    diag "using repo native binary: $REPO_ROOT/core/target/hara-truffle"
+    exec "$REPO_ROOT/core/target/hara-truffle" "$@"
+elif [ -x "$REPO_ROOT/core/rust/target/release/hara" ] && [ "$BACKEND" = "rust" ]; then
+    diag "using repo rust binary: $REPO_ROOT/core/rust/target/release/hara"
+    exec "$REPO_ROOT/core/rust/target/release/hara" "$@"
 fi
 
 BIN="${HOME}/.local/bin/hara-${BACKEND}"

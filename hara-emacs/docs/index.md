@@ -28,9 +28,9 @@ By default, opening a local `.hal` file beneath a directory containing `project.
 `hara-jack-in` automatically. Standalone and remote files remain disconnected. Customize
 `hara-auto-jack-in-projects` to disable this behavior.
 
-The `hara` launcher executes the prebuilt `target/hara-truffle.jar`; it never invokes Maven during
+The `hara` launcher executes the prebuilt `core/java/target/hara-truffle.jar`; it never invokes Maven during
 jack-in. Build or refresh that executable fat JAR explicitly with
-`mvn -Ptruffle -DskipTests package`. Override its location with `HARA_RUNTIME_JAR` when using an
+`mvn -f core/java/pom.xml -Ptruffle -DskipTests package`. Override its location with `HARA_RUNTIME_JAR` when using an
 installed artifact. New-server endpoint publication may wait up to `hara-server-start-timeout`
 (15 seconds by default), while normal endpoint negotiation retains the shorter
 `hara-connect-timeout`.
