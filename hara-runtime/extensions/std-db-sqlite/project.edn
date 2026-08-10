@@ -1,0 +1,22 @@
+{:hara/type :project
+ :hara/version "1.0.0"
+ :project/id hara/std-db-sqlite
+ :project/version "0.1.0"
+ :project/source-paths []
+ :project/test-paths []
+ :project/extension-paths ["target/package"]
+ :project/capabilities #{}
+ :project/extensions
+ {std.db.provider.sqlite
+  {:provider :hta :abi :hta.v1
+   :targets {:node {:module "node/worker.mjs" :runtime :process}
+             :browser {:module "browser/worker.mjs" :runtime :web-worker}}
+   :assets []
+   :exports
+   {"version" {:args [] :returns :map :async true}
+    "open" {:args [:map] :returns :map :async true}
+    "exec" {:args [:int :string :vector] :returns :map :async true}
+    "query" {:args [:int :string :vector] :returns :map :async true}
+    "work-call" {:args [:int :keyword :vector] :returns :any :async true}
+    "close" {:args [:int] :returns :boolean :async true}}
+   :capabilities []}}}

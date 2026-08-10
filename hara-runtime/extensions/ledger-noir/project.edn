@@ -1,0 +1,33 @@
+{:hara/type :project
+ :hara/version "1.0.0"
+ :project/id hara/ledger-noir
+ :project/version "0.1.0"
+ :project/source-paths []
+ :project/test-paths ["test"]
+ :project/extension-paths ["target/package"]
+ :project/capabilities #{}
+ :project/artifact-paths ["target/package"]
+ :project/archive-root "target/package"
+ :project/extensions
+ {ledger.noir
+  {:provider :hta
+   :abi :hta.v1
+   :root "target/package/ledger/noir"
+   :targets
+   {:node {:module "node/worker.mjs" :runtime :process}
+    :browser {:module "browser/worker.mjs" :runtime :web-worker}}
+   :assets
+   ["package.json"
+    "assets/noir-loader.js"
+    "assets/noir-wasm.mjs"
+    "assets/barretenberg.js"
+    "assets/barretenberg-threads.js"
+    "assets/main.worker.js"
+    "assets/thread.worker.js"]
+   :exports
+   {"compile" {:args [:value] :returns :value :async true}
+    "prove"   {:args [:value :map] :returns :value :async true}
+    "verify"  {:args [:value :value] :returns :boolean :async true}}
+   :capabilities []}}
+ :project/package {:entry-points ["ledger.noir"]
+                   :license "Apache-2.0"}}

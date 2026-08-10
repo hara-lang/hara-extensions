@@ -1,0 +1,68 @@
+name: std.db SQLite WASM
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "core/lib/src/std/db.hal"
+      - "core/lib/src/std/db/**"
+      - "core/lib/test/std/db/**"
+      - "core/java/src/test/java/hara/truffle/HaraDbRuntimeTest.java"
+      - "core/java/src/test/java/hara/truffle/HaraSqliteProcessExtensionTest.java"
+      - "hara-runtime/extensions/std-db-sqlite/**"
+      - "hara-runtime/web/entries/sqlite-*.mjs"
+      - "hara-runtime/web/packages/db-sqlite/**"
+      - "hara-runtime/web/sqlite-provider.test.mjs"
+      - "hara-runtime/web/vite.sqlite-*.config.js"
+      - "hara-runtime/web/package-db-provider.mjs"
+      - "hara-runtime/web/package-sqlite-extension.mjs"
+      - "hara-runtime/scripts/build-db-sqlite-extension"
+      - ".github/workflows/std-db-sqlite.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: std-db-sqlite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sqlite-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: extensions
+      - uses: actions/checkout@v4
+        with:
+          repository: hara-lang/hara
+          path: technology/hara
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: extensions/hara-runtime/web/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+      - name: Install Hara web build dependencies
+        working-directory: extensions/hara-runtime/web
+        run: npm ci
+      - name: Install pinned SQLite WASM provider
+        working-directory: extensions/hara-runtime/extensions/std-db-sqlite
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Build Node provider
+        working-directory: extensions/hara-runtime/web
+        run: ./node_modules/.bin/vite build --config vite.sqlite-node.config.js
+      - name: Build browser provider
+        working-directory: extensions/hara-runtime/web
+        run: ./node_modules/.bin/vite build --config vite.sqlite-browser.config.js
+      - name: Execute real SQLite WASM provider test
+        working-directory: extensions/hara-runtime/web
+        run: node --test sqlite-provider.test.mjs
+      - name: Assemble extension package
+        working-directory: extensions/hara-runtime/web
+        run: node package-sqlite-extension.mjs
+      - name: Execute SQLite and database runtimes through Hara
+        run: mvn -f technology/hara/core/java/pom.xml -Ptruffle -Dtest=hara.truffle.HaraDbRuntimeTest,hara.truffle.HaraSqliteProcessExtensionTest test

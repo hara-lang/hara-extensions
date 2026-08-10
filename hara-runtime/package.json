@@ -1,0 +1,26 @@
+{
+  "name": "@hara-lang/runtime-extensions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "extensions/ledger-noir",
+    "extensions/std-db-pglite",
+    "extensions/std-db-sqlite",
+    "web/packages/*"
+  ],
+  "scripts": {
+    "build:db:pglite": "bash scripts/build-db-pglite-extension",
+    "build:db:sqlite": "bash scripts/build-db-sqlite-extension",
+    "test:providers": "node --test web/pglite-provider.test.mjs web/postgres-host-services.test.mjs web/sqlite-provider.test.mjs"
+  },
+  "dependencies": {
+    "@hara-lang/hta": "file:../../technology/hara/core/rust/web/packages/hta"
+  },
+  "devDependencies": {
+    "vite": "8.1.5"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

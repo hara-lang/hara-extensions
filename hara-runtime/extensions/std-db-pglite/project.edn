@@ -1,0 +1,33 @@
+{:hara/type :project
+ :hara/version "1.0.0"
+ :project/id hara/std-db-pglite
+ :project/version "0.1.0"
+ :project/source-paths []
+ :project/test-paths []
+ :project/extension-paths ["target/package"]
+ :project/capabilities #{}
+ :project/extensions
+ {std.db.provider.pglite
+  {:provider :hta :abi :hta.v1
+   :targets {:node {:module "node/worker.mjs" :runtime :process}
+             :browser {:module "browser/worker.mjs" :runtime :web-worker}}
+   :assets []
+   :exports
+   {"describe" {:args [] :returns :map :async true}
+    "version" {:args [] :returns :map :async true}
+    "open" {:args [:map] :returns :map :async true}
+    "exec" {:args [:int :string :vector] :returns :map :async true}
+    "query" {:args [:int :string :vector] :returns :map :async true}
+    "query-options" {:args [:int :string :vector :map] :returns :map :async true}
+    "close" {:args [:int] :returns :boolean :async true}
+    "wait-ready" {:args [:map] :returns :map :async true}
+    "listen" {:args [:int :string] :returns :map :async true}
+    "notification-next" {:args [:int] :returns :map :async true}
+    "unlisten" {:args [:int] :returns :boolean :async true}
+    "notify" {:args [:int :string :string] :returns :boolean :async true}
+    "database-create" {:args [:map :string] :returns :map :async true}
+    "database-drop" {:args [:map :string] :returns :map :async true}
+    "server-start" {:args [:map] :returns :map :async true}
+    "server-stop" {:args [:map] :returns :map :async true}}
+   :capabilities [:sql :transactions :notifications :embedded
+                  :numeric :arrays :tagged-decode]}}}

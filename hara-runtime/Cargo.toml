@@ -1,0 +1,8 @@
+[workspace]
+members = [
+  "extensions/crypto-hash-sha256",
+  "extensions/demo-fft",
+  "extensions/demo-synth",
+  "modules/std-db-postgres",
+]
+resolver = "2"
