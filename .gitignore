@@ -1,6 +1,8 @@
 # Local JavaScript installs
 node_modules/
 target/
+dist/
+dist-*/
 
 # Local desktop metadata
 .DS_Store

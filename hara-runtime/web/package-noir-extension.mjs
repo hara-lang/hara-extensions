@@ -19,7 +19,7 @@ await cp(resolve(web, "dist-node/worker.mjs"), resolve(output, "node/worker.mjs"
 await mkdir(resolve(output, "browser"), { recursive: true });
 await cp(resolve(web, "dist-provider/worker.mjs"), resolve(output, "browser/worker.mjs"));
 
-const compiler = resolve(web, "node_modules/@noir-lang/noir_wasm/dist/web/main.mjs");
+const compiler = resolve(web, "../node_modules/@noir-lang/noir_wasm/dist/web/main.mjs");
 await cp(compiler, resolve(web, "dist/noir-wasm.mjs"));
 await cp(compiler, resolve(assets, "noir-wasm.mjs"));
 

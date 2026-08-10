@@ -10,14 +10,21 @@
     "web/packages/*"
   ],
   "scripts": {
+    "build:noir": "cd web && vite build --config vite.noir.config.js && vite build --config vite.noir-node.config.js && vite build --config vite.noir-provider.config.js && node package-noir-extension.mjs",
     "build:db:pglite": "bash scripts/build-db-pglite-extension",
     "build:db:sqlite": "bash scripts/build-db-sqlite-extension",
+    "test:noir": "npm run build:noir && node --test web/packages/noir/noir.test.mjs web/noir-loader.test.js",
     "test:providers": "node --test web/pglite-provider.test.mjs web/postgres-host-services.test.mjs web/sqlite-provider.test.mjs"
   },
   "dependencies": {
-    "@hara-lang/hta": "file:../../technology/hara/core/rust/web/packages/hta"
+    "@hara-lang/hta": "file:../../technology/hara/core/rust/web/packages/hta",
+    "@hara-lang/noir": "0.1.0",
+    "@aztec/bb.js": "5.1.0",
+    "@noir-lang/noir_js": "1.0.0-beta.25",
+    "@noir-lang/noir_wasm": "1.0.0-beta.25"
   },
   "devDependencies": {
+    "fake-indexeddb": "6.2.4",
     "vite": "8.1.5"
   },
   "engines": {
