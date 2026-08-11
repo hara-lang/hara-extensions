@@ -4,12 +4,13 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORKSPACE_ROOT=${HARA_WORKSPACE_ROOT:-$(cd "$ROOT/.." && pwd)}
 MANIFEST="$ROOT/hara-runtime/extensions/demo-fft/Cargo.toml"
+TARGET_DIR="$ROOT/hara-runtime/target"
 OUT_DIR="$WORKSPACE_ROOT/website/hara-www/assets/wasm"
 
 "$ROOT/hara-runtime/scripts/cargo-wasm-build" \
   --manifest-path "$MANIFEST" --target wasm32-unknown-unknown --release
 
 mkdir -p "$OUT_DIR"
-cp "$ROOT/hara-runtime/extensions/demo-fft/target/wasm32-unknown-unknown/release/hara_demo_fft.wasm" \
+cp "$TARGET_DIR/wasm32-unknown-unknown/release/hara_demo_fft.wasm" \
    "$OUT_DIR/demo-fft.wasm"
 echo "Built $OUT_DIR/demo-fft.wasm"
