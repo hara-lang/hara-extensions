@@ -2,7 +2,7 @@
  :hara/version "1.0.0"
  :project/id hara/std-db-pglite
  :project/version "0.1.0"
- :project/source-paths []
+ :project/source-paths ["src"]
  :project/test-paths []
  :project/extension-paths ["target/package"]
  :project/capabilities #{}

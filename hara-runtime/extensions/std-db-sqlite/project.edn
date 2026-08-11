@@ -2,8 +2,8 @@
  :hara/version "1.0.0"
  :project/id hara/std-db-sqlite
  :project/version "0.1.0"
- :project/source-paths []
- :project/test-paths []
+ :project/source-paths ["src"]
+ :project/test-paths ["test"]
  :project/extension-paths ["target/package"]
  :project/capabilities #{}
  :project/extensions
