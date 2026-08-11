@@ -27,6 +27,10 @@
                            (encode-coding-string "hé" 'utf-8 t)
                            "\r\n")))))
 
+(ert-deftest hara-protocol-version-accepts-truffle-and-rust-metadata ()
+  (should (= 4 (hara--protocol-version '(("PROTO" . 4)))))
+  (should (= 4 (hara--protocol-version '(("PROTOCOL" . "4"))))))
+
 (ert-deftest hara-frame-routing-waits-for-done ()
   (let* ((connection
           (hara--make-connection
@@ -135,6 +139,60 @@
     (font-lock-ensure)
     (should (eq (get-text-property 2 'face) 'font-lock-keyword-face))))
 
+(ert-deftest hara-mode-highlights-private-definitions ()
+  (with-temp-buffer
+    (hara-mode)
+    (insert "(def- private-value 42)\n(defn- private-function [] private-value)")
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (dolist (definition '("def-" "defn-"))
+      (search-forward definition)
+      (should (eq (get-text-property (match-beginning 0) 'face)
+                  'font-lock-keyword-face)))
+    (goto-char (point-min))
+    (search-forward "private-value")
+    (should (eq (get-text-property (match-beginning 0) 'face)
+                'font-lock-variable-name-face))
+    (search-forward "private-function")
+    (should (eq (get-text-property (match-beginning 0) 'face)
+                'font-lock-function-name-face))))
+
+(ert-deftest hara-mode-highlights-semantic-categories ()
+  (with-temp-buffer
+    (hara-mode)
+    (insert "(def answer true)\n"
+            "(declare later)\n"
+            "(defn add [x] x)\n"
+            "(defprotocol Lookup)\n"
+            "(defrecord Entry [])\n"
+            "(when-let [value :sample/key] *dynamic*)")
+    (font-lock-ensure)
+    (dolist (entry '(("answer" . font-lock-variable-name-face)
+                     ("later" . font-lock-variable-name-face)
+                     ("add" . font-lock-function-name-face)
+                     ("Lookup" . font-lock-type-face)
+                     ("Entry" . font-lock-type-face)
+                     ("when-let" . font-lock-keyword-face)
+                     ("true" . font-lock-constant-face)
+                     (":sample/key" . font-lock-constant-face)
+                     ("*dynamic*" . font-lock-variable-name-face)))
+      (goto-char (point-min))
+      (search-forward (car entry))
+      (should (eq (get-text-property (match-beginning 0) 'face) (cdr entry))))))
+
+(ert-deftest hara-mode-does-not-highlight-forms-in-comments-or-strings ()
+  (with-temp-buffer
+    (hara-mode)
+    (insert "; defn :comment\n\"defrecord :string\"")
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "defn")
+    (should-not (eq (get-text-property (match-beginning 0) 'face)
+                    'font-lock-keyword-face))
+    (search-forward "defrecord")
+    (should-not (eq (get-text-property (match-beginning 0) 'face)
+                    'font-lock-keyword-face))))
+
 (ert-deftest hara-structured-doc-formatting ()
   (let ((value '("SYMBOL" "sample/add"
                  "DOC" "Adds values.\nMore detail."
@@ -154,7 +212,7 @@
       (should-not (hara-eldoc-function (lambda (&rest _) (setq called t))))
       (should-not called))))
 
-(ert-deftest hara-completion-failure-does-not-break-company ()
+(ert-deftest hara-completion-failure-falls-back-without-breaking-company ()
   (with-temp-buffer
     (hara-mode)
     (insert "neg")
@@ -167,8 +225,53 @@
           (cl-letf (((symbol-function 'hara--request-sync)
                      (lambda (&rest _)
                        (error "stale runtime"))))
-            (should-not (hara-completion-at-point)))
+            (let ((completion (hara-completion-at-point)))
+              (should completion)
+              (should-not (nth 2 completion))))
         (delete-process process)))))
+
+(ert-deftest hara-completion-normalizes-runtime-responses-and-static-forms ()
+  (should (equal (hara--completion-candidates "mapv\nmap\nmapv" "ma")
+                 '("map" "mapv")))
+  (should (equal (hara--completion-candidates '("when-let" "when") "when")
+                 '("when" "when-let" "when-not"))))
+
+(ert-deftest hara-completion-works-offline-and-skips-comments-and-strings ()
+  (with-temp-buffer
+    (hara-mode)
+    (insert "defn-")
+    (let ((completion (hara-completion-at-point)))
+      (should (equal (nth 2 completion) '("defn-"))))
+    (erase-buffer)
+    (insert "; def")
+    (should-not (hara-completion-at-point))
+    (erase-buffer)
+    (insert "\"def\"")
+    (backward-char)
+    (should-not (hara-completion-at-point))))
+
+(ert-deftest hara-documentation-is-cached-and-invalidated ()
+  (let* ((process (make-pipe-process :name "hara-doc-cache-test"
+                                     :command '("cat") :noquery t))
+         (connection
+          (hara--make-connection :process process
+                                 :pending (make-hash-table :test #'equal)
+                                 :doc-cache (make-hash-table :test #'equal)))
+         (response '("SYMBOL" "add" "DOC" "Adds." "ARGLISTS" (("x"))))
+         (requests 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'hara--connection) (lambda () connection))
+                  ((symbol-function 'hara--request)
+                   (lambda (_connection _operation _arguments success &optional _failure)
+                     (cl-incf requests)
+                     (funcall success response))))
+          (hara--request-doc "add" #'ignore)
+          (hara--request-doc "add" #'ignore)
+          (should (= requests 1))
+          (hara--invalidate-doc-cache connection)
+          (hara--request-doc "add" #'ignore)
+          (should (= requests 2)))
+      (delete-process process))))
 
 (ert-deftest hara-inline-result-appears-after-form-and-clears-on-edit ()
   (with-temp-buffer
@@ -208,8 +311,8 @@
     (insert "\n  (+ 1 2)")
     (let ((arguments (hara--source-arguments "(+ 1 2)" 4)))
       (should (equal arguments
-                     '("(+ 1 2)" "FILE" "/tmp/sample.hal"
-                       "LINE" "2" "COLUMN" "3"))))))
+                     (list "(+ 1 2)" "FILE" (file-truename "/tmp/sample.hal")
+                           "LINE" "2" "COLUMN" "3"))))))
 
 (ert-deftest hara-xref-builds-source-location-from-doc-response ()
   (let ((hara--connection

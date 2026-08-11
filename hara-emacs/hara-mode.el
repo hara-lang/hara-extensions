@@ -13,6 +13,7 @@
 (require 'eldoc)
 (require 'imenu)
 (require 'project)
+(require 'seq)
 (require 'subr-x)
 (require 'xref)
 
@@ -141,7 +142,7 @@ Set this to nil to retain results until the next edit or evaluation."
 (define-error 'hara-resp-error "RESP protocol error")
 
 (cl-defstruct (hara-connection (:constructor hara--make-connection))
-  root host port process server-process pending counter session instance project refs)
+  root host port process server-process pending counter session instance project refs doc-cache)
 
 (defvar hara--connections (make-hash-table :test #'equal))
 (defvar-local hara--connection nil)
@@ -231,6 +232,13 @@ Return (VALUE . NEXT-OFFSET), or signal `hara-resp-incomplete'."
             (value (pop response)))
         (push (cons (upcase (format "%s" key)) value) result)))
     result))
+
+(defun hara--protocol-version (metadata)
+  "Return the numeric protocol version advertised by METADATA.
+Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
+  (let ((value (or (cdr (assoc "PROTO" metadata))
+                   (cdr (assoc "PROTOCOL" metadata)))))
+    (if (stringp value) (string-to-number value) value)))
 
 (defun hara--process-filter (process chunk)
   (let ((data (concat (or (process-get process 'hara-buffer) "")
@@ -390,7 +398,8 @@ Return (VALUE . NEXT-OFFSET), or signal `hara-resp-incomplete'."
           (hara--make-connection
            :root root :host host :port port :process network
            :server-process server-process :pending (make-hash-table :test #'equal)
-           :counter 0 :session "ROOT" :refs 0)))
+           :counter 0 :session "ROOT" :refs 0
+           :doc-cache (make-hash-table :test #'equal))))
     (process-put network 'hara-connection connection)
     (hara--send-value network '("HELLO" "4" "CLIENT" "EMACS"))
     (let ((deadline (+ (float-time) hara-connect-timeout)))
@@ -401,7 +410,7 @@ Return (VALUE . NEXT-OFFSET), or signal `hara-resp-incomplete'."
     (let* ((hello (process-get network 'hara-hello))
            (metadata (and (listp hello) (hara--flat-response-alist hello)))
            (server (cdr (assoc "SERVER" metadata)))
-           (protocol (cdr (assoc "PROTO" metadata)))
+           (protocol (hara--protocol-version metadata))
            (instance (cdr (assoc "INSTANCE" metadata)))
            (server-project (cdr (assoc "PROJECT" metadata))))
       (unless (and (equal server "HARA") (equal protocol 4))
@@ -553,13 +562,24 @@ Return (VALUE . NEXT-OFFSET), or signal `hara-resp-incomplete'."
   (format "EMACS-%d" (hara-connection-counter connection)))
 
 (defun hara--request (connection operation arguments success &optional failure)
-  (let ((id (hara--next-id connection)))
-    (puthash id (list :success success :failure (or failure #'hara--show-error))
+  (let* ((id (hara--next-id connection))
+         (success-callback
+          (if (member operation '("EVAL" "SESSION"))
+              (lambda (value)
+                (hara--invalidate-doc-cache connection)
+                (funcall success value))
+            success)))
+    (puthash id (list :success success-callback
+                      :failure (or failure #'hara--show-error))
              (hara-connection-pending connection))
     (hara--send-value
      (hara-connection-process connection)
      (append (list operation id) arguments))
     id))
+
+(defun hara--invalidate-doc-cache (connection)
+  (when-let ((cache (hara-connection-doc-cache connection)))
+    (clrhash cache)))
 
 (defun hara--request-sync (connection operation arguments)
   (let (done result error)
@@ -784,24 +804,63 @@ so a partial name is never evaluated."
       (beginning-of-defun)
       (hara-eval-region (point) end))))
 
+(defconst hara--static-completions
+  '("->" "->>" "as->" "case" "catch" "cond" "cond->" "cond->>" "declare"
+    "def" "def-" "defenum" "defmacro" "defmethod" "defmulti" "defn" "defn-"
+    "defprotocol" "defrecord" "defstruct" "deftype" "do" "doseq" "false"
+    "finally" "fn" "for" "if" "if-let" "if-not" "if-some" "in-ns" "let"
+    "loop" "new" "nil" "ns" "ns+" "protocol" "quote" "recur" "require"
+    "some->" "some->>" "syntax-quote" "throw" "true" "try" "when" "when-let"
+    "when-not" "while" "with-local-vars" "with-open" "with-redefs"))
+
+(defun hara--normalize-completions (value)
+  (cond
+   ((stringp value) (split-string value "\n" t "[[:space:]]+"))
+   ((listp value) (seq-filter #'stringp value))
+   (t nil)))
+
+(defun hara--completion-candidates (value prefix)
+  (let ((candidates (append (hara--normalize-completions value)
+                            hara--static-completions)))
+    (sort (delete-dups
+           (seq-filter (lambda (candidate) (string-prefix-p prefix candidate))
+                       candidates))
+          #'string-lessp)))
+
+(defun hara--completion-annotation (candidate)
+  (cond
+   ((member candidate '("nil" "true" "false")) " constant")
+   ((member candidate hara--static-completions) " form")
+   (t
+    (when-let* ((connection hara--connection)
+                (cache (hara-connection-doc-cache connection))
+                (value (gethash candidate cache))
+                (signature (hara--format-signatures value)))
+      (unless (string-empty-p signature)
+        (concat " " signature))))))
+
 (defun hara-completion-at-point ()
-  (when-let ((connection
-              (and hara--connection
-                   (process-live-p (hara-connection-process hara--connection))
-                   hara--connection)))
-    (condition-case error
-        (let ((end (point))
-              (start (save-excursion
-                       (skip-syntax-backward "w_")
-                       (point))))
-          (list start end
-                (hara--request-sync
-                 connection "COMPLETE"
-                 (list (buffer-substring-no-properties start end)))
-                :exclusive 'no))
-      (error
-       (message "Hara completion unavailable: %s" (error-message-string error))
-       nil))))
+  (unless (nth 8 (syntax-ppss))
+    (let* ((end (point))
+           (start (save-excursion
+                    (skip-syntax-backward "w_")
+                    (point)))
+           (prefix (buffer-substring-no-properties start end))
+           (connection (and hara--connection
+                            (process-live-p
+                             (hara-connection-process hara--connection))
+                            hara--connection))
+           runtime)
+      (when connection
+        (condition-case error
+            (setq runtime
+                  (hara--request-sync connection "COMPLETE" (list prefix)))
+          (error
+           (message "Hara runtime completion unavailable: %s"
+                    (error-message-string error)))))
+      (list start end (hara--completion-candidates runtime prefix)
+            :annotation-function #'hara--completion-annotation
+            :exclusive 'no))))
 
 (defun hara--symbol-at-point ()
   (let ((start (save-excursion
@@ -824,7 +883,31 @@ so a partial name is never evaluated."
     result))
 
 (defun hara--request-doc (symbol success &optional failure)
-  (hara--request (hara--connection) "DOC" (list symbol) success failure))
+  (let* ((connection (hara--connection))
+         (cache (or (hara-connection-doc-cache connection)
+                    (setf (hara-connection-doc-cache connection)
+                          (make-hash-table :test #'equal))))
+         (cached (gethash symbol cache 'hara--missing)))
+    (if (not (eq cached 'hara--missing))
+        (funcall success cached)
+      (hara--request
+       connection "DOC" (list symbol)
+       (lambda (value)
+         (puthash symbol value cache)
+         (funcall success value))
+       failure))))
+
+(defun hara--request-doc-sync (symbol)
+  (let* ((connection (hara--connection))
+         (cache (or (hara-connection-doc-cache connection)
+                    (setf (hara-connection-doc-cache connection)
+                          (make-hash-table :test #'equal))))
+         (cached (gethash symbol cache 'hara--missing)))
+    (if (not (eq cached 'hara--missing))
+        cached
+      (let ((value (hara--request-sync connection "DOC" (list symbol))))
+        (puthash symbol value cache)
+        value))))
 
 (defun hara--format-arglist (arglist)
   (cond
@@ -849,8 +932,8 @@ so a partial name is never evaluated."
     (when-let ((symbol (hara--symbol-at-point)))
       (let ((buffer (current-buffer))
             (generation (cl-incf hara--eldoc-generation)))
-        (hara--request
-         hara--connection "DOC" (list symbol)
+        (hara--request-doc
+         symbol
          (lambda (value)
            (when (buffer-live-p buffer)
              (with-current-buffer buffer
@@ -910,7 +993,7 @@ so a partial name is never evaluated."
   (hara--symbol-at-point))
 
 (cl-defmethod xref-backend-definitions ((_backend (eql hara)) identifier)
-  (let* ((value (hara--request-sync (hara--connection) "DOC" (list identifier)))
+  (let* ((value (hara--request-doc-sync identifier))
          (file (hara--doc-get value "FILE"))
          (line (hara--doc-get value "LINE"))
          (column (hara--doc-get value "COLUMN")))
@@ -928,7 +1011,7 @@ so a partial name is never evaluated."
 
 (defconst hara-imenu-generic-expression
   '(("Definitions"
-     "^(\\(?:def\\|defn-?\\|defmacro\\|defmulti\\|defprotocol\\|defstruct\\)\\s-+\\([^][(){}[:space:]]+\\)"
+     "^(\\(?:declare\\|def-?\\|defenum\\|defmacro\\|defmethod\\|defmulti\\|defn-?\\|defprotocol\\|defrecord\\|defstruct\\|deftype\\)\\s-+\\([^][(){}[:space:]]+\\)"
      1)))
 
 ;;;###autoload
@@ -1024,15 +1107,26 @@ so a partial name is never evaluated."
       (modify-syntax-entry char "_" table))
     table))
 
+(defconst hara--language-forms
+  '("." "->" "->>" "as->" "case" "catch" "cond" "cond->" "cond->>"
+    "declare" "def" "def-" "defenum" "defmacro" "defmethod" "defmulti" "defn"
+    "defn-" "defprotocol" "defrecord" "defstruct" "deftype" "do" "doseq"
+    "finally" "fn" "for" "if" "if-let" "if-not" "if-some" "in-ns" "let"
+    "loop" "new" "ns" "ns+" "protocol" "quote" "recur" "require" "some->"
+    "some->>" "syntax-quote" "throw" "try" "when" "when-let" "when-not"
+    "while" "with-local-vars" "with-open" "with-redefs"))
+
 (defconst hara-font-lock-keywords
-  `((,(regexp-opt
-       '("def" "defn" "defmacro" "defmulti" "defmethod" "fn" "let" "loop"
-         "recur" "if" "when" "cond" "case" "do" "try" "catch" "finally"
-         "throw" "ns" "require" "in-ns" "protocol" "defstruct")
-       'symbols)
-     . font-lock-keyword-face)
-    ("(\\(?:def\\|defn\\|defmacro\\|defmulti\\|defprotocol\\|defstruct\\)\\s-+\\(\\(?:\\sw\\|\\s_\\)+\\)"
-     1 font-lock-function-name-face)))
+  `((,(regexp-opt hara--language-forms 'symbols) . font-lock-keyword-face)
+    (,(regexp-opt '("nil" "true" "false") 'symbols) . font-lock-constant-face)
+    ("\\_<::?\\(?:\\sw\\|\\s_\\)+\\_>" . font-lock-constant-face)
+    ("\\_<\\*\\(?:\\sw\\|\\s_\\)+\\*\\_>" . font-lock-variable-name-face)
+    ("(\\(?:defn-?\\|defmacro\\|defmulti\\|defmethod\\)\\s-+\\(\\(?:\\sw\\|\\s_\\)+\\)"
+     1 font-lock-function-name-face)
+    ("(\\(?:def-?\\|declare\\)\\s-+\\(\\(?:\\sw\\|\\s_\\)+\\)"
+     1 font-lock-variable-name-face)
+    ("(\\(?:defenum\\|defprotocol\\|defrecord\\|defstruct\\|deftype\\)\\s-+\\(\\(?:\\sw\\|\\s_\\)+\\)"
+     1 font-lock-type-face)))
 
 (defvar hara-mode-map
   (let ((map (make-sparse-keymap)))

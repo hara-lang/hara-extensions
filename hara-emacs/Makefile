@@ -27,7 +27,7 @@ upgrade:
 # Runtime binary build/install targets
 # ---------------------------------------------------------------------------
 
-HARA_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../..
+HARA_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../../technology/hara
 LOCAL_BIN := $(HOME)/.local/bin
 LOCAL_SHARE := $(HOME)/.local/share/hara-mode
 
