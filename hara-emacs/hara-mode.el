@@ -10,6 +10,7 @@
 
 (require 'cl-lib)
 (require 'comint)
+(require 'compile)
 (require 'eldoc)
 (require 'imenu)
 (require 'project)
@@ -84,7 +85,7 @@ Prefer, in order:
   :type 'boolean)
 
 (defcustom hara-auto-jack-in-projects t
-  "When non-nil, automatically jack in for files beneath a project.hal.
+  "When non-nil, automatically jack in for files beneath a project.edn.
 Standalone Hara files do not trigger a connection."
   :type 'boolean)
 
@@ -300,25 +301,53 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
    (file-truename
     (or (locate-dominating-file
          default-directory
-         (lambda (directory)
-           (or (file-exists-p (expand-file-name "project.edn" directory))
-               (file-exists-p (expand-file-name "project.hal" directory)))))
+         "project.edn")
         (when-let ((project (project-current nil)))
           (project-root project))
         default-directory))))
 
 (defun hara--project-file-root ()
-  "Return the nearest project.edn or legacy project.hal root."
+  "Return the nearest project.edn root for the current file."
   (when (and buffer-file-name
              (not (file-remote-p buffer-file-name)))
     (when-let ((root (locate-dominating-file
                       (file-name-directory buffer-file-name)
-                      (lambda (directory)
-                        (or (file-exists-p
-                             (expand-file-name "project.edn" directory))
-                            (file-exists-p
-                             (expand-file-name "project.hal" directory)))))))
+                      "project.edn")))
       (file-name-as-directory (file-truename root)))))
+
+(defun hara--test-command (&optional file)
+  "Build the native Hara project test command, optionally focused on FILE."
+  (let ((root (hara--project-file-root)))
+    (unless root
+      (user-error "No project.edn found above the current file"))
+    (mapconcat #'shell-quote-argument
+               (append (list (hara--resolve-command)
+                             "--project" root "--offline" "project" "test")
+                       (and file (list (expand-file-name file))))
+               " ")))
+
+(defun hara-test-file ()
+  "Run the current Hara file through the native project test command."
+  (interactive)
+  (unless buffer-file-name
+    (user-error "Current buffer has no file"))
+  (save-buffer)
+  (compilation-start (hara--test-command buffer-file-name)
+                     'compilation-mode
+                     (lambda (_) "*Hara test*")))
+
+(defun hara-test-project ()
+  "Run all tests in the current Hara project."
+  (interactive)
+  (save-some-buffers t (lambda () (derived-mode-p 'hara-mode)))
+  (compilation-start (hara--test-command)
+                     'compilation-mode
+                     (lambda (_) "*Hara project test*")))
+
+(defun hara-test-rerun ()
+  "Rerun the most recent Hara compilation command."
+  (interactive)
+  (recompile))
 
 (defun hara--auto-jack-in ()
   (setq hara--auto-jack-in-timer nil)
@@ -1139,6 +1168,8 @@ so a partial name is never evaluated."
     (define-key map (kbd "C-c C-k") #'hara-eval-buffer)
     (define-key map (kbd "C-c C-d") #'hara-doc)
     (define-key map (kbd "C-c C-p") #'hara-doc-popup)
+    (define-key map (kbd "C-c C-t") #'hara-test-file)
+    (define-key map (kbd "C-c C-a") #'hara-test-project)
     (define-key map (kbd "M-.") #'xref-find-definitions)
     map))
 
@@ -1182,10 +1213,8 @@ so a partial name is never evaluated."
 (with-eval-after-load 'projectile
   (add-to-list 'projectile-project-root-files "project.edn")
   (add-to-list 'projectile-project-root-files-bottom-up "project.edn")
-  (add-to-list 'projectile-project-root-files "project.hal")
-  (add-to-list 'projectile-project-root-files-bottom-up "project.hal")
   (projectile-register-project-type
-   'hara '("project.hal")
+   'hara '("project.edn")
    :src-dir "src/"
    :test-dir "test/"
    :test-suffix "_test"))

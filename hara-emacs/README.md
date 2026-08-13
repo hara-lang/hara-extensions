@@ -24,7 +24,7 @@ Open a `.hal` file and run `M-x hara-jack-in` or press `C-c C-j`. The client fir
 validated project endpoint, then checks `hara-host`/`hara-port`, and finally starts
 `hara --port 0 headless`. Emacs-owned servers stop on `M-x hara-disconnect`.
 
-By default, opening a local `.hal` file beneath a directory containing `project.hal` schedules
+By default, opening a local `.hal` file beneath a directory containing `project.edn` schedules
 `hara-jack-in` automatically. Standalone and remote files remain disconnected. Customize
 `hara-auto-jack-in-projects` to disable this behavior.
 
@@ -45,6 +45,8 @@ Common commands:
 - `C-c C-z`: open the Hara REPL
 - `C-c C-d`: show documentation
 - `C-c C-p`: show documentation near point with `eldoc-box`
+- `C-c C-t`: test the current file with the native Hara project runner
+- `C-c C-a`: test the whole Hara project
 - `M-.`: jump to a source-backed definition with Xref
 - `M-,`: return through Xref history
 

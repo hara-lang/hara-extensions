@@ -102,8 +102,8 @@
     (unwind-protect
         (progn
           (make-directory source-directory)
-          (with-temp-file (expand-file-name "project.hal" root)
-            (insert "(defproject auto {})"))
+          (with-temp-file (expand-file-name "project.edn" root)
+            (insert "{:hara/type :project :project/id auto}"))
           (with-temp-buffer
             (setq-local buffer-file-name source-file)
             (cl-letf (((symbol-function 'run-at-time)
@@ -127,6 +127,41 @@
               (should-not jack-in-called))))
       (delete-directory root t)
       (delete-directory standalone-root t))))
+
+(ert-deftest hara-project-discovery-ignores-project-hal ()
+  (let* ((root (make-temp-file "hara-project-hal-" t))
+         (source (expand-file-name "src/tool/project.hal" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (with-temp-file source (insert "(ns tool.project)"))
+          (with-temp-buffer
+            (setq-local buffer-file-name source)
+            (should-not (hara--project-file-root))))
+      (delete-directory root t))))
+
+(ert-deftest hara-test-command-uses-project-edn-and-current-file ()
+  (let* ((root (make-temp-file "hara-test-project-" t))
+         (source (expand-file-name "test/sample_test.hal" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (with-temp-file (expand-file-name "project.edn" root) (insert "{}"))
+          (with-temp-file source (insert "(ns sample-test)"))
+          (with-temp-buffer
+            (setq-local buffer-file-name source)
+            (let ((hara-command "/usr/local/bin/hara"))
+              (cl-letf (((symbol-function 'hara--resolve-command)
+                         (lambda () hara-command)))
+                (should (equal
+                         (hara--test-command source)
+                         (mapconcat
+                          #'shell-quote-argument
+                          (list hara-command "--project"
+                                (file-name-as-directory (file-truename root))
+                                "--offline" "project" "test" source)
+                          " ")))))))
+      (delete-directory root t))))
 
 (ert-deftest hara-mode-installs-built-in-editing-hooks ()
   (with-temp-buffer
