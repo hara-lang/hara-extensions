@@ -1,0 +1,465 @@
+name: Apply PostgreSQL arbitrary precision v2 once
+
+on:
+  push:
+    branches:
+      - agent/postgres-arbitrary-precision-abi
+    paths:
+      - '.github/workflows/apply-postgres-arbitrary-precision-v2-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'hara-lang/hara-extensions'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out the exact branch head
+        uses: actions/checkout@v4
+        with:
+          ref: agent/postgres-arbitrary-precision-abi
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply the exact ABI and numeric migration
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one match, found {count}")
+              return text.replace(old, new, 1)
+
+          cargo_path = Path("hara-runtime/modules/std-db-postgres/Cargo.toml")
+          cargo = cargo_path.read_text()
+          cargo = replace_once(
+              cargo,
+              'hara-abi = { git = "https://github.com/hara-lang/hara.git", rev = "defad8f3324b7277562603027447ef465eadb568", package = "hara-abi" }',
+              'hara-abi = { git = "https://github.com/hara-lang/hara.git", rev = "af4e2856ae2580db9c1337044e6e1dc52bc8c30e", package = "hara-abi" }',
+              "Hara ABI revision",
+          )
+          cargo = replace_once(
+              cargo,
+              'serde_json = "1"',
+              'serde_json = { version = "1", features = ["arbitrary_precision"] }',
+              "serde_json exact-number feature",
+          )
+          cargo_path.write_text(cargo)
+
+          path = Path("hara-runtime/modules/std-db-postgres/src/lib.rs")
+          source = path.read_text()
+
+          source = replace_once(
+              source,
+              '''    if matches!(*inferred, Type::JSON | Type::JSONB) {
+                  return Ok(inferred.clone());
+              }
+              let Some((tag, fields)) = postgres_tag(value) else {''',
+              '''    if matches!(*inferred, Type::JSON | Type::JSONB) {
+                  return Ok(inferred.clone());
+              }
+              if matches!(value, Value::BigInteger(_))
+                  && matches!(*inferred, Type::TEXT | Type::UNKNOWN)
+              {
+                  return Ok(Type::NUMERIC);
+              }
+              let Some((tag, fields)) = postgres_tag(value) else {''',
+              "BigInteger parameter inference",
+          )
+
+          int2 = '''        (Value::Integer(value), &Type::INT2) => {
+              boxed!(i16::try_from(*value).map_err(|_| type_error(ty))?)
+          }'''
+          source = replace_once(
+              source,
+              int2,
+              int2 + '''
+              (Value::BigInteger(value), &Type::INT2) => {
+                  boxed!(value.parse::<i16>().map_err(|_| type_error(ty))?)
+              }''',
+              "checked INT2 BigInteger parameter",
+          )
+          int4 = '''        (Value::Integer(value), &Type::INT4) => {
+              boxed!(i32::try_from(*value).map_err(|_| type_error(ty))?)
+          }'''
+          source = replace_once(
+              source,
+              int4,
+              int4 + '''
+              (Value::BigInteger(value), &Type::INT4) => {
+                  boxed!(value.parse::<i32>().map_err(|_| type_error(ty))?)
+              }''',
+              "checked INT4 BigInteger parameter",
+          )
+          source = replace_once(
+              source,
+              '        (Value::Integer(value), &Type::INT8) => boxed!(*value),',
+              '''        (Value::Integer(value), &Type::INT8) => boxed!(*value),
+              (Value::BigInteger(value), &Type::INT8) => {
+                  boxed!(value.parse::<i64>().map_err(|_| type_error(ty))?)
+              }''',
+              "checked INT8 BigInteger parameter",
+          )
+
+          source = replace_once(
+              source,
+              '''fn simple_numeric(text: String) -> Value {
+              if !matches!(text.as_str(), "NaN" | "Infinity" | "-Infinity") {
+                  let integral = text
+                      .split_once('.')
+                      .map(|(whole, fraction)| fraction.bytes().all(|byte| byte == b'0').then_some(whole))
+                      .unwrap_or(Some(text.as_str()));
+                  if let Some(value) = integral.and_then(|value| value.parse::<i64>().ok()) {
+                      return Value::Integer(value);
+                  }
+                  if let Ok(value) = text.parse::<f64>() {
+                      if value.is_finite() {
+                          return Value::Float(value);
+                      }
+                  }
+              }
+              numeric_tag(text)
+          }''',
+              '''fn integer_text(value: &str) -> bool {
+              let digits = value.strip_prefix('-').unwrap_or(value);
+              !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+          }
+
+          fn simple_numeric(text: String) -> Value {
+              if matches!(text.as_str(), "NaN" | "Infinity" | "-Infinity") {
+                  return numeric_tag(text);
+              }
+              let integral = text
+                  .split_once('.')
+                  .map(|(whole, fraction)| fraction.bytes().all(|byte| byte == b'0').then_some(whole))
+                  .unwrap_or(Some(text.as_str()));
+              if let Some(value) = integral.filter(|value| integer_text(value)) {
+                  if let Ok(value) = value.parse::<i64>() {
+                      return Value::Integer(value);
+                  }
+                  return Value::BigInteger(value.into());
+              }
+              if text.contains('.') {
+                  Value::Decimal(text)
+              } else {
+                  numeric_tag(text)
+              }
+          }''',
+              "exact NUMERIC decoding",
+          )
+
+          source = replace_once(
+              source,
+              '''fn numeric_parameter_text(value: &Value) -> Result<String, Error> {
+              match value {
+                  Value::Integer(value) => Ok(value.to_string()),''',
+              '''fn numeric_parameter_text(value: &Value) -> Result<String, Error> {
+              match value {
+                  Value::Integer(value) => Ok(value.to_string()),
+                  Value::BigInteger(value) if integer_text(value) => Ok(value.clone()),''',
+              "exact BigInteger NUMERIC encoding",
+          )
+
+          source = replace_once(
+              source,
+              '''        Type::INT2 | Type::INT4 | Type::INT8 => match value {
+                  Value::Integer(value) => value.to_string(),
+                  _ => return Err(type_error(ty)),
+              },''',
+              '''        Type::INT2 => match value {
+                  Value::Integer(value) => i16::try_from(*value)
+                      .map_err(|_| type_error(ty))?
+                      .to_string(),
+                  Value::BigInteger(value) => value
+                      .parse::<i16>()
+                      .map_err(|_| type_error(ty))?
+                      .to_string(),
+                  _ => return Err(type_error(ty)),
+              },
+              Type::INT4 => match value {
+                  Value::Integer(value) => i32::try_from(*value)
+                      .map_err(|_| type_error(ty))?
+                      .to_string(),
+                  Value::BigInteger(value) => value
+                      .parse::<i32>()
+                      .map_err(|_| type_error(ty))?
+                      .to_string(),
+                  _ => return Err(type_error(ty)),
+              },
+              Type::INT8 => match value {
+                  Value::Integer(value) => value.to_string(),
+                  Value::BigInteger(value) => value
+                      .parse::<i64>()
+                      .map_err(|_| type_error(ty))?
+                      .to_string(),
+                  _ => return Err(type_error(ty)),
+              },''',
+              "checked fixed-width integer arrays",
+          )
+
+          source = replace_once(
+              source,
+              '''fn expect_i64(value: Option<&Value>, name: &str) -> Result<i64, Error> {
+              match value {
+                  Some(Value::Integer(value)) => Ok(*value),
+                  _ => Err(Error::new(
+                      "postgres/config-invalid",
+                      format!("{name} must be an integer"),
+                  )),
+              }
+          }''',
+              '''fn expect_i64(value: Option<&Value>, name: &str) -> Result<i64, Error> {
+              match value {
+                  Some(Value::Integer(value)) => Ok(*value),
+                  Some(Value::BigInteger(value)) => value.parse::<i64>().map_err(|_| {
+                      Error::new(
+                          "postgres/config-invalid",
+                          format!("{name} must fit a signed 64-bit integer"),
+                      )
+                  }),
+                  _ => Err(Error::new(
+                      "postgres/config-invalid",
+                      format!("{name} must be an integer"),
+                  )),
+              }
+          }''',
+              "checked ABI i64 boundary",
+          )
+
+          source = replace_once(
+              source,
+              '''fn integer_option(options: &BTreeMap<String, Value>, name: &str, fallback: i64) -> i64 {
+              match options.get(name) {
+                  Some(Value::Integer(value)) => *value,
+                  _ => fallback,
+              }
+          }''',
+              '''fn integer_option(options: &BTreeMap<String, Value>, name: &str, fallback: i64) -> i64 {
+              match options.get(name) {
+                  Some(Value::Integer(value)) => *value,
+                  Some(Value::BigInteger(value)) => value.parse::<i64>().unwrap_or(fallback),
+                  _ => fallback,
+              }
+          }''',
+              "representation-independent integer options",
+          )
+
+          source = replace_once(
+              source,
+              '''fn abi_json(value: &Value) -> Result<serde_json::Value, Error> {
+              Ok(match value {
+                  Value::Nil => serde_json::Value::Null,
+                  Value::Boolean(value) => (*value).into(),
+                  Value::Integer(value) => (*value).into(),
+                  Value::Float(value) => (*value).into(),
+                  Value::Decimal(value) | Value::String(value) | Value::Keyword(value) => {
+                      value.clone().into()
+                  }
+                  Value::Vector(values) => {
+                      serde_json::Value::Array(values.iter().map(abi_json).collect::<Result<Vec<_>, _>>()?)
+                  }
+                  Value::Record(values) => serde_json::Value::Object(
+                      values
+                          .iter()
+                          .map(|(key, value)| Ok((key.clone(), abi_json(value)?)))
+                          .collect::<Result<_, Error>>()?,
+                  ),
+                  Value::Bytes(_) => {
+                      return Err(Error::new(
+                          "postgres/type-unsupported",
+                          "bytes cannot be JSON",
+                      ))
+                  }
+                  _ => {
+                      return Err(Error::new(
+                          "postgres/type-unsupported",
+                          "runtime-only values cannot be JSON",
+                      ))
+                  }
+              })
+          }
+          fn json_abi(value: serde_json::Value) -> Value {
+              match value {
+                  serde_json::Value::Null => Value::Nil,
+                  serde_json::Value::Bool(value) => Value::Boolean(value),
+                  serde_json::Value::Number(value) => value
+                      .as_i64()
+                      .map(Value::Integer)
+                      .or_else(|| value.as_f64().map(Value::Float))
+                      .unwrap_or_else(|| Value::Decimal(value.to_string())),
+                  serde_json::Value::String(value) => Value::String(value),
+                  serde_json::Value::Array(values) => {
+                      Value::Vector(values.into_iter().map(json_abi).collect())
+                  }
+                  serde_json::Value::Object(values) => Value::Record(
+                      values
+                          .into_iter()
+                          .map(|(key, value)| (key, json_abi(value)))
+                          .collect(),
+                  ),
+              }
+          }''',
+              '''fn exact_json_number(value: &str) -> Result<serde_json::Value, Error> {
+              let value = serde_json::from_str::<serde_json::Value>(value).map_err(|_| {
+                  Error::new(
+                      "postgres/type-unsupported",
+                      "invalid exact JSON number",
+                  )
+              })?;
+              if value.is_number() {
+                  Ok(value)
+              } else {
+                  Err(Error::new(
+                      "postgres/type-unsupported",
+                      "invalid exact JSON number",
+                  ))
+              }
+          }
+
+          fn abi_json(value: &Value) -> Result<serde_json::Value, Error> {
+              Ok(match value {
+                  Value::Nil => serde_json::Value::Null,
+                  Value::Boolean(value) => (*value).into(),
+                  Value::Integer(value) => (*value).into(),
+                  Value::BigInteger(value) | Value::Decimal(value) => exact_json_number(value)?,
+                  Value::Float(value) => (*value).into(),
+                  Value::String(value) | Value::Keyword(value) => value.clone().into(),
+                  Value::Vector(values) => {
+                      serde_json::Value::Array(values.iter().map(abi_json).collect::<Result<Vec<_>, _>>()?)
+                  }
+                  Value::Record(values) => serde_json::Value::Object(
+                      values
+                          .iter()
+                          .map(|(key, value)| Ok((key.clone(), abi_json(value)?)))
+                          .collect::<Result<_, Error>>()?,
+                  ),
+                  Value::Bytes(_) => {
+                      return Err(Error::new(
+                          "postgres/type-unsupported",
+                          "bytes cannot be JSON",
+                      ))
+                  }
+              })
+          }
+          fn json_abi(value: serde_json::Value) -> Value {
+              match value {
+                  serde_json::Value::Null => Value::Nil,
+                  serde_json::Value::Bool(value) => Value::Boolean(value),
+                  serde_json::Value::Number(value) => {
+                      let text = value.to_string();
+                      if integer_text(&text) {
+                          text.parse::<i64>()
+                              .map(Value::Integer)
+                              .unwrap_or_else(|_| Value::BigInteger(text))
+                      } else {
+                          Value::Decimal(text)
+                      }
+                  }
+                  serde_json::Value::String(value) => Value::String(value),
+                  serde_json::Value::Array(values) => {
+                      Value::Vector(values.into_iter().map(json_abi).collect())
+                  }
+                  serde_json::Value::Object(values) => Value::Record(
+                      values
+                          .into_iter()
+                          .map(|(key, value)| (key, json_abi(value)))
+                          .collect(),
+                  ),
+              }
+          }''',
+              "exact ABI JSON numerics",
+          )
+
+          source = replace_once(
+              source,
+              '''        assert_eq!(simple_numeric("12.000".into()), Value::Integer(12));
+                  assert_eq!(simple_numeric("12.3400".into()), Value::Float(12.34));
+                  assert_eq!(simple_numeric("1e10000".into()), numeric_tag("1e10000"));
+              }
+
+              #[test]
+              fn array_text_preserves_dimensions_and_rejects_ragged_values() {''',
+              '''        assert_eq!(simple_numeric("12.000".into()), Value::Integer(12));
+                  assert_eq!(
+                      simple_numeric("12.3400".into()),
+                      Value::Decimal("12.3400".into())
+                  );
+                  assert_eq!(
+                      simple_numeric("9223372036854775808".into()),
+                      Value::BigInteger("9223372036854775808".into())
+                  );
+                  assert_eq!(simple_numeric("1e10000".into()), numeric_tag("1e10000"));
+              }
+
+              #[test]
+              fn arbitrary_precision_values_cross_postgres_boundaries_exactly() {
+                  let big = "92233720368547758081234567890";
+                  let decimal = "1234567890.12345678901234567890";
+
+                  assert_eq!(
+                      parameter_type(&Value::BigInteger(big.into()), &Type::UNKNOWN).unwrap(),
+                      Type::NUMERIC
+                  );
+                  assert_eq!(
+                      numeric_parameter_text(&Value::BigInteger(big.into())).unwrap(),
+                      big
+                  );
+                  assert!(parameter(&Value::BigInteger(big.into()), &Type::INT8).is_err());
+                  assert_eq!(
+                      array_parameter_text(
+                          &Value::Vector(vec![Value::BigInteger(big.into())]),
+                          &Type::NUMERIC,
+                          None,
+                      )
+                      .unwrap(),
+                      format!("{{{big}}}")
+                  );
+                  assert_eq!(
+                      expect_i64(Some(&Value::BigInteger("42".into())), "value").unwrap(),
+                      42
+                  );
+                  assert!(expect_i64(
+                      Some(&Value::BigInteger("9223372036854775808".into())),
+                      "value"
+                  )
+                  .is_err());
+
+                  let encoded_big = abi_json(&Value::BigInteger(big.into())).unwrap();
+                  assert_eq!(encoded_big.to_string(), big);
+                  assert_eq!(json_abi(encoded_big), Value::BigInteger(big.into()));
+
+                  let encoded_decimal = abi_json(&Value::Decimal(decimal.into())).unwrap();
+                  assert_eq!(encoded_decimal.to_string(), decimal);
+                  assert_eq!(json_abi(encoded_decimal), Value::Decimal(decimal.into()));
+              }
+
+              #[test]
+              fn array_text_preserves_dimensions_and_rejects_ragged_values() {''',
+              "arbitrary-precision PostgreSQL tests",
+          )
+
+          path.write_text(source)
+          PY
+      - name: Format, lock, and validate the provider
+        run: |
+          cargo fmt --manifest-path hara-runtime/Cargo.toml --all
+          cargo test --manifest-path hara-runtime/Cargo.toml -p hara-db-postgres
+          cargo check --manifest-path hara-runtime/Cargo.toml --workspace
+          cargo test --locked --manifest-path hara-runtime/Cargo.toml -p hara-db-postgres
+      - name: Commit the reviewed migration
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            hara-runtime/Cargo.lock \
+            hara-runtime/modules/std-db-postgres/Cargo.toml \
+            hara-runtime/modules/std-db-postgres/src/lib.rs
+          git diff --cached --stat
+          git diff --cached --quiet && exit 0
+          git commit -m "postgres: support arbitrary-precision ABI numerics"
+          git push origin HEAD:agent/postgres-arbitrary-precision-abi
