@@ -21,6 +21,20 @@ jobs:
       - name: Preserve the asserted patch script
         run: cp .github/scripts/agent_postgres_bigint_abi.py /tmp/agent_postgres_bigint_abi.py
 
+      - name: Checkout the current Hara ABI source tree
+        uses: actions/checkout@v4
+        with:
+          repository: hara-lang/hara
+          ref: 7eb824eccc7b8cafce5fb8fcb23842bd405e2bdd
+          path: technology/hara
+
+      - name: Expose the historical sibling checkout layout
+        shell: bash
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/../technology"
+          rm -rf "$GITHUB_WORKSPACE/../technology/hara"
+          ln -s "$GITHUB_WORKSPACE/technology/hara" "$GITHUB_WORKSPACE/../technology/hara"
+
       - name: Rebuild the change from current main
         shell: bash
         run: |
