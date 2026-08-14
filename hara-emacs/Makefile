@@ -8,13 +8,15 @@ all: compile test
 test:
 	emacs --batch -L . -L test \
 	  -l test/hara-mode-test.el \
+	  -l test/hara-manage-test.el \
 	  -f ert-run-tests-batch-and-exit
 
 compile:
-	emacs --batch -L . -f batch-byte-compile hara-mode.el
+	emacs --batch -L . -f batch-byte-compile \
+	  hara-mode.el hara-manage.el
 
 clean:
-	rm -f hara-mode.elc
+	rm -f hara-mode.elc hara-manage.elc
 
 upgrade:
 	emacs --batch \
