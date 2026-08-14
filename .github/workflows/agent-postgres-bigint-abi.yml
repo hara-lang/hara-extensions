@@ -1,0 +1,56 @@
+name: Validate PostgreSQL BigInteger ABI compatibility
+
+on:
+  push:
+    branches:
+      - agent/postgres-bigint-abi
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-publish:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Preserve the asserted patch script
+        run: cp .github/scripts/agent_postgres_bigint_abi.py /tmp/agent_postgres_bigint_abi.py
+
+      - name: Rebuild the change from current main
+        shell: bash
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+          python /tmp/agent_postgres_bigint_abi.py
+          cargo fmt --manifest-path hara-runtime/Cargo.toml
+          cargo update --manifest-path hara-runtime/Cargo.toml -p hara-abi
+          git diff --check
+          changed=$(git diff --name-only | sort)
+          expected=$(printf '%s\n' \
+            hara-runtime/Cargo.lock \
+            hara-runtime/modules/std-db-postgres/Cargo.toml \
+            hara-runtime/modules/std-db-postgres/src/lib.rs)
+          test "$changed" = "$expected"
+
+      - name: Test PostgreSQL provider
+        run: cargo test --manifest-path hara-runtime/Cargo.toml -p hara-db-postgres -- --nocapture
+
+      - name: Test runtime extension workspace
+        run: cargo test --manifest-path hara-runtime/Cargo.toml --workspace
+
+      - name: Publish one clean commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            hara-runtime/Cargo.lock \
+            hara-runtime/modules/std-db-postgres/Cargo.toml \
+            hara-runtime/modules/std-db-postgres/src/lib.rs
+          git commit -m "fix(postgres): preserve promoted integers across JSON"
+          git push --force-with-lease origin HEAD:${GITHUB_REF_NAME}
