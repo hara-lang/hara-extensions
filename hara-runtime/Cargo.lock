@@ -351,18 +351,18 @@ dependencies = [
 
 [[package]]
 name = "hara-abi"
-version = "0.1.0"
+version = "0.1.6"
 
 [[package]]
 name = "hara-abi"
-version = "0.1.0"
-source = "git+https://github.com/hara-lang/hara.git?rev=d1aa887c#d1aa887c275000b758b20d09e97eff6d08221059"
+version = "0.1.6"
+source = "git+https://github.com/hara-lang/hara.git?rev=af4e2856ae2580db9c1337044e6e1dc52bc8c30e#af4e2856ae2580db9c1337044e6e1dc52bc8c30e"
 
 [[package]]
 name = "hara-crypto-hash-sha256"
 version = "0.1.0"
 dependencies = [
- "hara-abi 0.1.0",
+ "hara-abi 0.1.6",
  "hara-hta",
 ]
 
@@ -373,7 +373,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures-util",
- "hara-abi 0.1.0 (git+https://github.com/hara-lang/hara.git?rev=d1aa887c)",
+ "hara-abi 0.1.6 (git+https://github.com/hara-lang/hara.git?rev=af4e2856ae2580db9c1337044e6e1dc52bc8c30e)",
  "rustls",
  "rustls-native-certs",
  "serde_json",
@@ -393,9 +393,9 @@ version = "0.1.0"
 
 [[package]]
 name = "hara-hta"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
- "hara-abi 0.1.0",
+ "hara-abi 0.1.6",
 ]
 
 [[package]]

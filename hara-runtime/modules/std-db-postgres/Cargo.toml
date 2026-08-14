@@ -10,13 +10,13 @@ description = "Optional PostgreSQL native ABI module for Hara and Hestia"
 crate-type = ["rlib"]
 
 [dependencies]
-hara-abi = { git = "https://github.com/hara-lang/hara.git", rev = "defad8f3324b7277562603027447ef465eadb568", package = "hara-abi" }
+hara-abi = { git = "https://github.com/hara-lang/hara.git", rev = "af4e2856ae2580db9c1337044e6e1dc52bc8c30e", package = "hara-abi" }
 bytes = "1"
 chrono = "0.4"
 futures-util = "0.3"
 rustls = "0.23"
 rustls-native-certs = "0.8"
-serde_json = "1"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 tokio-postgres = { version = "0.7.18", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
