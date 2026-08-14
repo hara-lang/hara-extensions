@@ -25,28 +25,8 @@ jobs:
 
           source = Path("hara-runtime/modules/std-db-postgres/src/lib.rs")
           text = source.read_text()
-          old = '''        Value::Bytes(_) => {
-              return Err(Error::new(
-                  "postgres/type-unsupported",
-                  "bytes cannot be JSON",
-              ))
-          }
-      })
-          '''
-          new = '''        Value::Bytes(_) => {
-              return Err(Error::new(
-                  "postgres/type-unsupported",
-                  "bytes cannot be JSON",
-              ))
-          }
-          _ => {
-              return Err(Error::new(
-                  "postgres/type-unsupported",
-                  "runtime-only values cannot be JSON",
-              ))
-          }
-      })
-          '''
+          old = "        Value::Bytes(_) => {\n            return Err(Error::new(\n                \"postgres/type-unsupported\",\n                \"bytes cannot be JSON\",\n            ))\n        }\n    })\n"
+          new = "        Value::Bytes(_) => {\n            return Err(Error::new(\n                \"postgres/type-unsupported\",\n                \"bytes cannot be JSON\",\n            ))\n        }\n        _ => {\n            return Err(Error::new(\n                \"postgres/type-unsupported\",\n                \"runtime-only values cannot be JSON\",\n            ))\n        }\n    })\n"
           if old not in text:
               raise SystemExit("expected abi_json match was not found")
           source.write_text(text.replace(old, new, 1))
