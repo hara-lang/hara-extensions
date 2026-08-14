@@ -21,6 +21,20 @@ jobs:
         with:
           ref: agent/postgres-arbitrary-precision-abi
           fetch-depth: 0
+      - name: Check out the exact Hara ABI source tree
+        uses: actions/checkout@v4
+        with:
+          repository: hara-lang/hara
+          ref: af4e2856ae2580db9c1337044e6e1dc52bc8c30e
+          path: technology/hara
+          fetch-depth: 1
+      - name: Expose the extension workspace's sibling Hara layout
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/../technology"
+          rm -rf "$GITHUB_WORKSPACE/../technology/hara"
+          ln -s "$GITHUB_WORKSPACE/technology/hara" "$GITHUB_WORKSPACE/../technology/hara"
+          test "$(git -C "$GITHUB_WORKSPACE/technology/hara" rev-parse HEAD)" = \
+            af4e2856ae2580db9c1337044e6e1dc52bc8c30e
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
