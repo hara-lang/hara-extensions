@@ -1,0 +1,78 @@
+name: Publish PostgreSQL arbitrary precision once
+
+on:
+  push:
+    branches:
+      - agent/postgres-arbitrary-precision-abi
+    paths:
+      - '.github/workflows/publish-postgres-arbitrary-precision-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'hara-lang/hara-extensions'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/postgres-arbitrary-precision-abi
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: hara-lang/hara
+          ref: af4e2856ae2580db9c1337044e6e1dc52bc8c30e
+          path: technology/hara
+          fetch-depth: 1
+      - name: Expose the exact sibling Hara checkout
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/../technology"
+          rm -rf "$GITHUB_WORKSPACE/../technology/hara"
+          ln -s "$GITHUB_WORKSPACE/technology/hara" "$GITHUB_WORKSPACE/../technology/hara"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Reproduce the validated source and lockfile
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/scripts/apply_postgres_arbitrary_precision_v3.py')
+          text = path.read_text()
+          old = '''    end_index = text.find(end, start_index + len(start))
+              if end_index < 0:
+                  raise SystemExit(f"{label}: end marker not found")
+              if text.find(start, start_index + len(start), end_index) >= 0:
+                  raise SystemExit(f"{label}: start marker is not unique in section")
+              return text[:start_index] + replacement.rstrip() + "\\n\\n" + text[end_index:]
+          '''
+          new = '''    if not end:
+                  return text[:start_index] + replacement.rstrip() + "\\n"
+              end_index = text.find(end, start_index + len(start))
+              if end_index < 0:
+                  raise SystemExit(f"{label}: end marker not found")
+              if text.find(start, start_index + len(start), end_index) >= 0:
+                  raise SystemExit(f"{label}: start marker is not unique in section")
+              return text[:start_index] + replacement.rstrip() + "\\n\\n" + text[end_index:]
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one tail-helper anchor, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          python3 .github/scripts/apply_postgres_arbitrary_precision_v3.py
+          cargo fmt --manifest-path hara-runtime/Cargo.toml --all
+          cargo test --manifest-path hara-runtime/Cargo.toml -p hara-db-postgres
+      - name: Commit and push the validated implementation
+        run: |
+          git restore .github/scripts/apply_postgres_arbitrary_precision_v3.py
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            hara-runtime/Cargo.lock \
+            hara-runtime/modules/std-db-postgres/Cargo.toml \
+            hara-runtime/modules/std-db-postgres/src/lib.rs
+          git diff --cached --stat
+          git commit -m "postgres: support arbitrary-precision ABI numerics"
+          git push origin HEAD:agent/postgres-arbitrary-precision-abi
