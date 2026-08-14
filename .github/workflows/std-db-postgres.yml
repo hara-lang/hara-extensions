@@ -1,0 +1,73 @@
+name: std.db PostgreSQL provider
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hara-runtime/Cargo.toml"
+      - "hara-runtime/Cargo.lock"
+      - "hara-runtime/modules/std-db-postgres/**"
+      - ".github/workflows/std-db-postgres.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "hara-runtime/Cargo.toml"
+      - "hara-runtime/Cargo.lock"
+      - "hara-runtime/modules/std-db-postgres/**"
+      - ".github/workflows/std-db-postgres.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: std-db-postgres-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Read the PostgreSQL provider's pinned Hara ABI revision
+        id: hara-abi
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import re
+          import tomllib
+          from pathlib import Path
+
+          manifest = Path("hara-runtime/modules/std-db-postgres/Cargo.toml")
+          data = tomllib.loads(manifest.read_text())
+          dependency = data["dependencies"]["hara-abi"]
+          commit = dependency.get("rev") if isinstance(dependency, dict) else None
+          if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise SystemExit("hara-abi must be pinned to an exact 40-character revision")
+          print(f"commit={commit}")
+          PY
+      - name: Check out the exact Hara ABI source tree
+        uses: actions/checkout@v4
+        with:
+          repository: hara-lang/hara
+          ref: ${{ steps.hara-abi.outputs.commit }}
+          path: technology/hara
+          fetch-depth: 1
+      - name: Expose and verify the extension workspace's sibling Hara layout
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/../technology"
+          rm -rf "$GITHUB_WORKSPACE/../technology/hara"
+          ln -s "$GITHUB_WORKSPACE/technology/hara" "$GITHUB_WORKSPACE/../technology/hara"
+          test "$(git -C "$GITHUB_WORKSPACE/technology/hara" rev-parse HEAD)" = \
+            "${{ steps.hara-abi.outputs.commit }}"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check PostgreSQL provider formatting
+        run: cargo fmt --manifest-path hara-runtime/Cargo.toml --package hara-db-postgres -- --check
+      - name: Test the PostgreSQL provider against its pinned Hara ABI
+        run: cargo test --locked --manifest-path hara-runtime/Cargo.toml -p hara-db-postgres
+      - name: Check the extension workspace against the same ABI
+        run: cargo check --locked --manifest-path hara-runtime/Cargo.toml --workspace

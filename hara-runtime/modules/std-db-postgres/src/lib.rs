@@ -733,6 +733,11 @@ fn parameter_type(value: &Value, inferred: &Type) -> Result<Type, Error> {
     if matches!(*inferred, Type::JSON | Type::JSONB) {
         return Ok(inferred.clone());
     }
+    if matches!(value, Value::BigInteger(_) | Value::Decimal(_))
+        && matches!(*inferred, Type::TEXT | Type::UNKNOWN)
+    {
+        return Ok(Type::NUMERIC);
+    }
     let Some((tag, fields)) = postgres_tag(value) else {
         return Ok(inferred.clone());
     };
@@ -809,10 +814,19 @@ fn parameter(value: &Value, ty: &Type) -> Result<Box<dyn ToSql + Sync>, Error> {
         (Value::Integer(value), &Type::INT2) => {
             boxed!(i16::try_from(*value).map_err(|_| type_error(ty))?)
         }
+        (Value::BigInteger(value), &Type::INT2) => {
+            boxed!(value.parse::<i16>().map_err(|_| type_error(ty))?)
+        }
         (Value::Integer(value), &Type::INT4) => {
             boxed!(i32::try_from(*value).map_err(|_| type_error(ty))?)
         }
+        (Value::BigInteger(value), &Type::INT4) => {
+            boxed!(value.parse::<i32>().map_err(|_| type_error(ty))?)
+        }
         (Value::Integer(value), &Type::INT8) => boxed!(*value),
+        (Value::BigInteger(value), &Type::INT8) => {
+            boxed!(value.parse::<i64>().map_err(|_| type_error(ty))?)
+        }
         (Value::Float(value), &Type::FLOAT4) => boxed!(*value as f32),
         (Value::Float(value), &Type::FLOAT8) => boxed!(*value),
         (Value::String(value), &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR | &Type::NAME) => {
@@ -933,22 +947,30 @@ fn decode_raw(ty: &Type, raw: &[u8], decode: DecodeMode) -> Result<Value, Error>
     }
 }
 
+fn integer_text(value: &str) -> bool {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn simple_numeric(text: String) -> Value {
-    if !matches!(text.as_str(), "NaN" | "Infinity" | "-Infinity") {
-        let integral = text
-            .split_once('.')
-            .map(|(whole, fraction)| fraction.bytes().all(|byte| byte == b'0').then_some(whole))
-            .unwrap_or(Some(text.as_str()));
-        if let Some(value) = integral.and_then(|value| value.parse::<i64>().ok()) {
+    if matches!(text.as_str(), "NaN" | "Infinity" | "-Infinity") {
+        return numeric_tag(text);
+    }
+    let integral = text
+        .split_once('.')
+        .map(|(whole, fraction)| fraction.bytes().all(|byte| byte == b'0').then_some(whole))
+        .unwrap_or(Some(text.as_str()));
+    if let Some(value) = integral.filter(|value| integer_text(value)) {
+        if let Ok(value) = value.parse::<i64>() {
             return Value::Integer(value);
         }
-        if let Ok(value) = text.parse::<f64>() {
-            if value.is_finite() {
-                return Value::Float(value);
-            }
-        }
+        return Value::BigInteger(value.into());
     }
-    numeric_tag(text)
+    if text.contains('.') {
+        Value::Decimal(text)
+    } else {
+        numeric_tag(text)
+    }
 }
 
 fn decode_numeric(raw: &[u8]) -> Result<String, Error> {
@@ -1071,6 +1093,7 @@ fn nest_array(values: &mut impl Iterator<Item = Value>, dimensions: &[(i32, i32)
 fn numeric_parameter_text(value: &Value) -> Result<String, Error> {
     match value {
         Value::Integer(value) => Ok(value.to_string()),
+        Value::BigInteger(value) if integer_text(value) => Ok(value.clone()),
         Value::Float(value) if value.is_nan() => Ok("NaN".into()),
         Value::Float(value) if *value == f64::INFINITY => Ok("Infinity".into()),
         Value::Float(value) if *value == f64::NEG_INFINITY => Ok("-Infinity".into()),
@@ -1252,8 +1275,32 @@ fn array_element_text(value: &Value, ty: &Type) -> Result<String, Error> {
             Value::Boolean(value) => value.to_string(),
             _ => return Err(type_error(ty)),
         },
-        Type::INT2 | Type::INT4 | Type::INT8 => match value {
+        Type::INT2 => match value {
+            Value::Integer(value) => i16::try_from(*value)
+                .map_err(|_| type_error(ty))?
+                .to_string(),
+            Value::BigInteger(value) => value
+                .parse::<i16>()
+                .map_err(|_| type_error(ty))?
+                .to_string(),
+            _ => return Err(type_error(ty)),
+        },
+        Type::INT4 => match value {
+            Value::Integer(value) => i32::try_from(*value)
+                .map_err(|_| type_error(ty))?
+                .to_string(),
+            Value::BigInteger(value) => value
+                .parse::<i32>()
+                .map_err(|_| type_error(ty))?
+                .to_string(),
+            _ => return Err(type_error(ty)),
+        },
+        Type::INT8 => match value {
             Value::Integer(value) => value.to_string(),
+            Value::BigInteger(value) => value
+                .parse::<i64>()
+                .map_err(|_| type_error(ty))?
+                .to_string(),
             _ => return Err(type_error(ty)),
         },
         Type::FLOAT4 | Type::FLOAT8 => match value {
@@ -1444,12 +1491,19 @@ fn expect_string<'a>(value: Option<&'a Value>, name: &str) -> Result<&'a str, Er
 fn expect_i64(value: Option<&Value>, name: &str) -> Result<i64, Error> {
     match value {
         Some(Value::Integer(value)) => Ok(*value),
+        Some(Value::BigInteger(value)) => value.parse::<i64>().map_err(|_| {
+            Error::new(
+                "postgres/config-invalid",
+                format!("{name} must fit a signed 64-bit integer"),
+            )
+        }),
         _ => Err(Error::new(
             "postgres/config-invalid",
             format!("{name} must be an integer"),
         )),
     }
 }
+
 fn string_value(value: &Value) -> Option<&str> {
     match value {
         Value::String(value) => Some(value),
@@ -1467,9 +1521,11 @@ fn string_option<'a>(
 fn integer_option(options: &BTreeMap<String, Value>, name: &str, fallback: i64) -> i64 {
     match options.get(name) {
         Some(Value::Integer(value)) => *value,
+        Some(Value::BigInteger(value)) => value.parse::<i64>().unwrap_or(fallback),
         _ => fallback,
     }
 }
+
 fn identifier(value: &str) -> Result<String, Error> {
     if value.is_empty() || value.contains('\0') {
         Err(Error::new(
@@ -1494,15 +1550,34 @@ fn type_error(ty: &Type) -> Error {
     Error::new("postgres/type-unsupported", ty.name())
 }
 
+fn exact_json_number(value: &str) -> Result<serde_json::Value, Error> {
+    let value = serde_json::from_str::<serde_json::Value>(value)
+        .map_err(|_| Error::new("postgres/type-unsupported", "invalid exact JSON number"))?;
+    if value.is_number() {
+        Ok(value)
+    } else {
+        Err(Error::new(
+            "postgres/type-unsupported",
+            "invalid exact JSON number",
+        ))
+    }
+}
+
 fn abi_json(value: &Value) -> Result<serde_json::Value, Error> {
     Ok(match value {
         Value::Nil => serde_json::Value::Null,
         Value::Boolean(value) => (*value).into(),
         Value::Integer(value) => (*value).into(),
-        Value::Float(value) => (*value).into(),
-        Value::Decimal(value) | Value::String(value) | Value::Keyword(value) => {
-            value.clone().into()
-        }
+        Value::BigInteger(value) | Value::Decimal(value) => exact_json_number(value)?,
+        Value::Float(value) => serde_json::Number::from_f64(*value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| {
+                Error::new(
+                    "postgres/type-unsupported",
+                    "JSON does not support non-finite floating-point values",
+                )
+            })?,
+        Value::String(value) | Value::Keyword(value) => value.clone().into(),
         Value::Vector(values) => {
             serde_json::Value::Array(values.iter().map(abi_json).collect::<Result<Vec<_>, _>>()?)
         }
@@ -1518,23 +1593,23 @@ fn abi_json(value: &Value) -> Result<serde_json::Value, Error> {
                 "bytes cannot be JSON",
             ))
         }
-        _ => {
-            return Err(Error::new(
-                "postgres/type-unsupported",
-                "runtime-only values cannot be JSON",
-            ))
-        }
     })
 }
+
 fn json_abi(value: serde_json::Value) -> Value {
     match value {
         serde_json::Value::Null => Value::Nil,
         serde_json::Value::Bool(value) => Value::Boolean(value),
-        serde_json::Value::Number(value) => value
-            .as_i64()
-            .map(Value::Integer)
-            .or_else(|| value.as_f64().map(Value::Float))
-            .unwrap_or_else(|| Value::Decimal(value.to_string())),
+        serde_json::Value::Number(value) => {
+            let text = value.to_string();
+            if integer_text(&text) {
+                text.parse::<i64>()
+                    .map(Value::Integer)
+                    .unwrap_or_else(|_| Value::BigInteger(text))
+            } else {
+                Value::Decimal(text)
+            }
+        }
         serde_json::Value::String(value) => Value::String(value),
         serde_json::Value::Array(values) => {
             Value::Vector(values.into_iter().map(json_abi).collect())
@@ -1581,7 +1656,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_binary_decoding_and_simple_conversion_are_stable() {
+    fn numeric_binary_decoding_and_simple_conversion_are_exact() {
         let raw = [
             0, 2, // ndigits
             0, 0, // weight
@@ -1591,8 +1666,75 @@ mod tests {
         ];
         assert_eq!(decode_numeric(&raw).unwrap(), "12.3400");
         assert_eq!(simple_numeric("12.000".into()), Value::Integer(12));
-        assert_eq!(simple_numeric("12.3400".into()), Value::Float(12.34));
+        assert_eq!(
+            simple_numeric("12.3400".into()),
+            Value::Decimal("12.3400".into())
+        );
+        assert_eq!(
+            simple_numeric("9223372036854775808".into()),
+            Value::BigInteger("9223372036854775808".into())
+        );
         assert_eq!(simple_numeric("1e10000".into()), numeric_tag("1e10000"));
+    }
+
+    #[test]
+    fn arbitrary_precision_values_cross_postgres_boundaries_exactly() {
+        let big = "92233720368547758081234567890";
+        let decimal = "1234567890.12345678901234567890";
+
+        assert_eq!(
+            parameter_type(&Value::BigInteger(big.into()), &Type::UNKNOWN).unwrap(),
+            Type::NUMERIC
+        );
+        assert_eq!(
+            parameter_type(&Value::Decimal(decimal.into()), &Type::UNKNOWN).unwrap(),
+            Type::NUMERIC
+        );
+        assert_eq!(
+            numeric_parameter_text(&Value::BigInteger(big.into())).unwrap(),
+            big
+        );
+        assert!(parameter(&Value::BigInteger(big.into()), &Type::INT8).is_err());
+        assert!(parameter(&Value::BigInteger("42".into()), &Type::INT8).is_ok());
+        assert_eq!(
+            array_parameter_text(
+                &Value::Vector(vec![Value::BigInteger(big.into())]),
+                &Type::NUMERIC,
+                None,
+            )
+            .unwrap(),
+            format!("{{{big}}}")
+        );
+        assert!(array_parameter_text(
+            &Value::Vector(vec![Value::BigInteger("32768".into())]),
+            &Type::INT2,
+            None,
+        )
+        .is_err());
+        assert_eq!(
+            expect_i64(Some(&Value::BigInteger("42".into())), "value").unwrap(),
+            42
+        );
+        assert!(expect_i64(
+            Some(&Value::BigInteger("9223372036854775808".into())),
+            "value"
+        )
+        .is_err());
+
+        let encoded_big = abi_json(&Value::BigInteger(big.into())).unwrap();
+        assert_eq!(encoded_big.to_string(), big);
+        assert_eq!(json_abi(encoded_big), Value::BigInteger(big.into()));
+
+        let encoded_decimal = abi_json(&Value::Decimal(decimal.into())).unwrap();
+        assert_eq!(encoded_decimal.to_string(), decimal);
+        assert_eq!(json_abi(encoded_decimal), Value::Decimal(decimal.into()));
+    }
+
+    #[test]
+    fn json_rejects_non_json_numeric_values() {
+        assert!(abi_json(&Value::Float(f64::NAN)).is_err());
+        assert!(abi_json(&Value::Decimal("NaN".into())).is_err());
+        assert!(abi_json(&Value::BigInteger("not-an-integer".into())).is_err());
     }
 
     #[test]
