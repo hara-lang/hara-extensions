@@ -1,0 +1,43 @@
+name: std.db PostgreSQL provider
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hara-runtime/Cargo.toml"
+      - "hara-runtime/Cargo.lock"
+      - "hara-runtime/modules/std-db-postgres/**"
+      - ".github/workflows/std-db-postgres.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "hara-runtime/Cargo.toml"
+      - "hara-runtime/Cargo.lock"
+      - "hara-runtime/modules/std-db-postgres/**"
+      - ".github/workflows/std-db-postgres.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: std-db-postgres-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --manifest-path hara-runtime/Cargo.toml --all -- --check
+      - name: Test the PostgreSQL provider against its pinned Hara ABI
+        run: cargo test --locked --manifest-path hara-runtime/Cargo.toml -p hara-db-postgres
+      - name: Check the extension workspace
+        run: cargo check --locked --manifest-path hara-runtime/Cargo.toml --workspace
