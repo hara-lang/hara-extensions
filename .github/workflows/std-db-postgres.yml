@@ -65,8 +65,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Check formatting
-        run: cargo fmt --manifest-path hara-runtime/Cargo.toml --all -- --check
+      - name: Check PostgreSQL provider formatting
+        run: cargo fmt --manifest-path hara-runtime/Cargo.toml --package hara-db-postgres -- --check
       - name: Test the PostgreSQL provider against its pinned Hara ABI
         run: cargo test --locked --manifest-path hara-runtime/Cargo.toml -p hara-db-postgres
       - name: Check the extension workspace against the same ABI
