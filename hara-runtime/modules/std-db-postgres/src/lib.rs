@@ -1518,6 +1518,12 @@ fn abi_json(value: &Value) -> Result<serde_json::Value, Error> {
                 "bytes cannot be JSON",
             ))
         }
+        _ => {
+            return Err(Error::new(
+                "postgres/type-unsupported",
+                "runtime-only values cannot be JSON",
+            ))
+        }
     })
 }
 fn json_abi(value: serde_json::Value) -> Value {
