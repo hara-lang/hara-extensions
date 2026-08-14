@@ -27,11 +27,25 @@ concurrency:
 jobs:
   rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Check out the exact Hara ABI source tree
+        uses: actions/checkout@v4
+        with:
+          repository: hara-lang/hara
+          ref: af4e2856ae2580db9c1337044e6e1dc52bc8c30e
+          path: technology/hara
+          fetch-depth: 1
+      - name: Expose the extension workspace's sibling Hara layout
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/../technology"
+          rm -rf "$GITHUB_WORKSPACE/../technology/hara"
+          ln -s "$GITHUB_WORKSPACE/technology/hara" "$GITHUB_WORKSPACE/../technology/hara"
+          test "$(git -C "$GITHUB_WORKSPACE/technology/hara" rev-parse HEAD)" = \
+            af4e2856ae2580db9c1337044e6e1dc52bc8c30e
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -39,5 +53,5 @@ jobs:
         run: cargo fmt --manifest-path hara-runtime/Cargo.toml --all -- --check
       - name: Test the PostgreSQL provider against its pinned Hara ABI
         run: cargo test --locked --manifest-path hara-runtime/Cargo.toml -p hara-db-postgres
-      - name: Check the extension workspace
+      - name: Check the extension workspace against the same ABI
         run: cargo check --locked --manifest-path hara-runtime/Cargo.toml --workspace
