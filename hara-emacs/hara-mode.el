@@ -13,6 +13,7 @@
 (require 'compile)
 (require 'eldoc)
 (require 'imenu)
+(require 'hara-manage nil t)
 (require 'project)
 (require 'seq)
 (require 'subr-x)

@@ -4,6 +4,8 @@
 completion, Xref navigation, Imenu, sessions, project-aware server startup, and a REPL. Its core
 uses built-in Emacs APIs; the optional documentation popup uses `eldoc-box`.
 
+`hara-manage.el` adds native Foundation-compatible `code.manage` previews, writes, and navigable findings.
+
 Install from GitHub with `package-vc` (Emacs 29.1+):
 
 ```elisp
@@ -47,6 +49,7 @@ Common commands:
 - `C-c C-p`: show documentation near point with `eldoc-box`
 - `C-c C-t`: test the current file with the native Hara project runner
 - `C-c C-a`: test the whole Hara project
+- `C-c m`: open the `code.manage` prefix (`s`/`i`/`p`/`n`/`d`/`m`)
 - `M-.`: jump to a source-backed definition with Xref
 - `M-,`: return through Xref history
 
@@ -56,12 +59,37 @@ timeout configured by `hara-inline-result-duration` remains a fallback; customiz
 `hara-inline-result-max-length` to control truncation.
 ElDoc stays silent until the current buffer has explicitly connected to Hara.
 
+## `code.manage` workflows
+
+Hara buffers expose project workflows beneath `C-c m`:
+
+- `C-c m s` previews `scaffold`; with a prefix argument it prompts for `--added VERSION`.
+- `C-c m i` previews `import`.
+- `C-c m p` previews `purge`.
+- `C-c m n` reports incomplete definitions and `TODO` facts.
+- `C-c m d` reports historical M/T/N/C pedantic findings.
+- `C-c m m` selects any workflow with completion.
+
+The integration resolves the current `ns` or `ns+` declaration, normalizes a
+`foo-test` buffer back to `foo`, saves affected Hara buffers, and invokes:
+
+```text
+hara --project ROOT --offline manage OP NAMESPACE --format editor-json
+```
+
+Editing operations render a unified diff and require confirmation before a
+fresh `--write` invocation. Immediately before writing, every preview `before`
+value is checked against disk; stale previews and paths escaping the project
+root—including symlink-mediated escapes—are rejected. Reporting operations use
+compilation-style `path:line:column` locations. Successful writes refresh
+unmodified visiting buffers and open a newly created scaffold test.
+
 Run tests with:
 
 ```sh
 cd apps/hara-emacs
-make test        # run the ERT suite
-make compile     # byte-compile hara-mode.el
+make test        # run the hara-mode and hara-manage ERT suites
+make compile     # byte-compile hara-mode.el and hara-manage.el
 make upgrade     # update the package-vc checkout in ~/.emacs.d/elpa
 ```
 
@@ -87,7 +115,8 @@ Or directly:
 
 ```sh
 emacs -Q --batch -L apps/hara-emacs -L apps/hara-emacs/test \
-  -l hara-mode-test.el -f ert-run-tests-batch-and-exit
+  -l hara-mode-test.el \
+  -l hara-manage-test.el -f ert-run-tests-batch-and-exit
 ```
 
 ## Troubleshooting
