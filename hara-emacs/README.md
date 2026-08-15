@@ -22,6 +22,35 @@ Or use a plain checkout:
 (require 'hara-mode)
 ```
 
+### Install from a checkout with Make
+
+`make install` byte-compiles and installs both modules. The default destination
+is `~/.local/share/emacs/site-lisp/hara-mode`:
+
+```sh
+make install
+make uninstall
+```
+
+For a system prefix or packaging root:
+
+```sh
+make install PREFIX=/usr/local
+make install DESTDIR="$PWD/pkgroot" PREFIX=/usr
+```
+
+Override `LISPDIR` to choose an exact Emacs Lisp directory. When the selected
+location is not already in `load-path`, add it in your Emacs configuration:
+
+```elisp
+(add-to-list 'load-path "~/.local/share/emacs/site-lisp/hara-mode")
+(require 'hara-mode)
+```
+
+The package install does not install a Hara runtime. Install Hara separately
+from its source checkout with `make install`, or otherwise ensure `hara` is on
+`PATH`.
+
 Open a `.hal` file and run `M-x hara-jack-in` or press `C-c C-j`. The client first reuses a
 validated project endpoint, then checks `hara-host`/`hara-port`, and finally starts
 `hara --port 0 headless`. Emacs-owned servers stop on `M-x hara-disconnect`.
@@ -88,7 +117,7 @@ Run tests with:
 
 ```sh
 cd apps/hara-emacs
-make test        # run the hara-mode and hara-manage ERT suites
+make test        # run install checks plus the hara-mode and hara-manage ERT suites
 make compile     # byte-compile hara-mode.el and hara-manage.el
 make upgrade     # update the package-vc checkout in ~/.emacs.d/elpa
 ```
