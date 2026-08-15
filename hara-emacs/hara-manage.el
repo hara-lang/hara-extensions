@@ -45,6 +45,8 @@
   operation namespace root added payload)
 
 (defvar hara-manage--process nil)
+(defvar hara-manage-after-write-hook nil
+  "Hook run after a code.manage write completes successfully.")
 (defvar-local hara-manage--preview nil)
 
 (defun hara-manage--json-get (object key &optional default)
@@ -301,7 +303,8 @@ Append --write when WRITE is non-nil and --added ADDED when supplied."
 (defun hara-manage--process-sentinel (process _event)
   "Handle a native CLI PROCESS completion."
   (when (memq (process-status process) '(exit signal))
-    (setq hara-manage--process nil)
+    (when (eq process hara-manage--process)
+      (setq hara-manage--process nil))
     (let* ((exit (process-exit-status process))
            (output (or (hara-manage--process-output process) ""))
            (preview (process-get process 'hara-manage-preview))
@@ -327,6 +330,7 @@ Append --write when WRITE is non-nil and --added ADDED when supplied."
               (if applying
                   (progn
                     (hara-manage--refresh-visiting-buffers completed payload)
+                    (run-hooks 'hara-manage-after-write-hook)
                     (message "hara manage %s applied"
                              (hara-manage-preview-operation completed)))
                 (if (hara-manage--editing-operation-p
@@ -371,6 +375,23 @@ When ADDED is nil, preserve the override stored in PREVIEW."
     (setq hara-manage--process process)
     (message "Running hara manage %s for %s" operation namespace)
     process))
+
+;;;###autoload
+(defun hara-manage-cancel ()
+  "Cancel the active non-writing code.manage operation.
+An apply operation cannot be cancelled because doing so could leave a partial
+write on disk."
+  (interactive)
+  (unless (process-live-p hara-manage--process)
+    (user-error "No hara manage command is running"))
+  (when (process-get hara-manage--process 'hara-manage-applying)
+    (user-error "Cannot safely cancel a code.manage write"))
+  (let ((process hara-manage--process))
+    (setq hara-manage--process nil)
+    (set-process-sentinel process #'ignore)
+    (delete-process process)
+    (hara-manage--process-output process)
+    (message "Hara manage operation cancelled")))
 
 (defun hara-manage--apply (preview)
   "Verify and apply PREVIEW through a fresh --write invocation."
@@ -475,6 +496,7 @@ With a prefix argument, prompt for an explicit :added version."
     (define-key map (kbd "p") #'hara-manage-purge)
     (define-key map (kbd "n") #'hara-manage-incomplete)
     (define-key map (kbd "d") #'hara-manage-pedantic)
+    (define-key map (kbd "k") #'hara-manage-cancel)
     (define-key map (kbd "m") #'hara-manage-dispatch)
     map)
   "Prefix keymap installed beneath `C-c m'.")

@@ -8,8 +8,17 @@
 # ~/.local, so `make bin-build` alone is enough to pick up source changes.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BACKEND="${HARA_BACKEND:-truffle}"
+
+# Support both the current workspace layout and the former Hara monorepo
+# layout. HARA_WORKSPACE_ROOT is the explicit integration override.
+if [ -n "${HARA_WORKSPACE_ROOT:-}" ] && [ -d "$HARA_WORKSPACE_ROOT/technology/hara/core" ]; then
+    HARA_ROOT="$HARA_WORKSPACE_ROOT/technology/hara"
+elif [ -d "$SCRIPT_DIR/../../../technology/hara/core" ]; then
+    HARA_ROOT="$(cd "$SCRIPT_DIR/../../../technology/hara" && pwd)"
+else
+    HARA_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+fi
 
 diag() {
     [ -n "${HARA_DIAGNOSTICS:-}" ] && echo "hara-launcher: $*" >&2
@@ -17,8 +26,8 @@ diag() {
 
 if [ "$BACKEND" = "truffle" ]; then
     if [ -z "$HARA_RUNTIME_JAR" ]; then
-        if [ -r "$REPO_ROOT/core/java/target/hara-truffle.jar" ]; then
-            HARA_RUNTIME_JAR="$REPO_ROOT/core/java/target/hara-truffle.jar"
+        if [ -r "$HARA_ROOT/core/java/target/hara-truffle.jar" ]; then
+            HARA_RUNTIME_JAR="$HARA_ROOT/core/java/target/hara-truffle.jar"
             diag "using repo Truffle jar: $HARA_RUNTIME_JAR"
         else
             HARA_RUNTIME_JAR="${HOME}/.local/share/hara-mode/hara-truffle.jar"
@@ -35,12 +44,12 @@ if [ "$BACKEND" = "truffle" ]; then
     exec java -jar "$HARA_RUNTIME_JAR" "$@"
 fi
 
-if [ -x "$REPO_ROOT/core/target/hara-truffle" ] && [ "$BACKEND" = "native" ]; then
-    diag "using repo native binary: $REPO_ROOT/core/target/hara-truffle"
-    exec "$REPO_ROOT/core/target/hara-truffle" "$@"
-elif [ -x "$REPO_ROOT/core/rust/target/release/hara" ] && [ "$BACKEND" = "rust" ]; then
-    diag "using repo rust binary: $REPO_ROOT/core/rust/target/release/hara"
-    exec "$REPO_ROOT/core/rust/target/release/hara" "$@"
+if [ -x "$HARA_ROOT/core/target/hara-truffle" ] && [ "$BACKEND" = "native" ]; then
+    diag "using repo native binary: $HARA_ROOT/core/target/hara-truffle"
+    exec "$HARA_ROOT/core/target/hara-truffle" "$@"
+elif [ -x "$HARA_ROOT/core/rust/target/release/hara" ] && [ "$BACKEND" = "rust" ]; then
+    diag "using repo rust binary: $HARA_ROOT/core/rust/target/release/hara"
+    exec "$HARA_ROOT/core/rust/target/release/hara" "$@"
 fi
 
 BIN="${HOME}/.local/bin/hara-${BACKEND}"

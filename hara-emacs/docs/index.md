@@ -48,7 +48,7 @@ Common commands:
 - `M-.`: jump to a source-backed definition with Xref
 - `M-,`: return through Xref history
 
-Evaluation results use CIDER-style boxed, syntax-highlighted overlays at the end of the line, with
+Evaluation results use Hara-owned boxed, syntax-highlighted overlays at the end of the line, with
 fringe feedback and adaptive wrapping for long values. They clear after the next command. The
 timeout configured by `hara-inline-result-duration` remains a fallback; customize
 `hara-inline-result-max-length` to control truncation.

@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'comint)
 (require 'compile)
+(require 'easymenu)
 (require 'eldoc)
 (require 'imenu)
 (require 'hara-manage nil t)
@@ -45,12 +46,13 @@ executable on `exec-path'."
       (and (file-executable-p bin) bin))))
 
 (defun hara--find-in-ancestors (start relative-path)
-  "Search upward from START for RELATIVE-PATH and return its absolute path."
+  "Search upward from START for executable RELATIVE-PATH."
   (let ((dir (file-name-as-directory start))
         found)
     (while (and dir (not found))
       (let ((candidate (expand-file-name relative-path dir)))
-        (if (file-exists-p candidate)
+        (if (and (file-regular-p candidate)
+                 (file-executable-p candidate))
             (setq found candidate)
           (let ((parent (file-name-directory (directory-file-name dir))))
             (setq dir (if (equal parent dir) nil parent))))))
@@ -61,14 +63,16 @@ executable on `exec-path'."
 Prefer, in order:
 1. An absolute, executable `hara-command'.
 2. A `hara' script in the current project root or its ancestors.
-3. The package-local `bin/hara' wrapper.
-4. The raw `hara-command' value."
+3. A workspace or legacy monorepo hara-emacs launcher.
+4. The package-local `bin/hara' wrapper.
+5. The raw `hara-command' value."
   (cond
    ((and (file-name-absolute-p hara-command)
          (file-executable-p hara-command))
     hara-command)
    ((when-let ((root (hara--project-file-root)))
       (or (hara--find-in-ancestors root "hara")
+          (hara--find-in-ancestors root "extensions/hara-emacs/bin/hara")
           (hara--find-in-ancestors root "apps/hara-emacs/bin/hara"))))
    ((hara--package-bin))
    (t hara-command)))
@@ -147,6 +151,7 @@ Set this to nil to retain results until the next edit or evaluation."
   root host port process server-process pending counter session instance project refs doc-cache)
 
 (defvar hara--connections (make-hash-table :test #'equal))
+(defvar hara--namespace-file-cache (make-hash-table :test #'equal))
 (defvar-local hara--connection nil)
 (defvar-local hara--repl-connection nil)
 (defvar-local hara--result-overlay nil)
@@ -327,6 +332,10 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
                        (and file (list (expand-file-name file))))
                " ")))
 
+(defalias 'hara-import #'hara-manage-import)
+(defalias 'hara-scaffold #'hara-manage-scaffold)
+(defalias 'hara-purge #'hara-manage-purge)
+
 (defun hara-test-file ()
   "Run the current Hara file through the native project test command."
   (interactive)
@@ -491,7 +500,8 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
            :name (format "hara-server-%s"
                          (substring (secure-hash 'sha1 root) 0 8))
            :buffer buffer
-           :command (list command "--host" "127.0.0.1"
+           :command (list command "--project" root "--root" root
+                          "--host" "127.0.0.1"
                           "--port" "0" "headless")
            :coding 'utf-8 :noquery t
            :connection-type 'pipe))
@@ -566,6 +576,40 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
     (when (process-live-p server) (delete-process server)))
   (hara--delete-cache (hara-connection-root connection))
   (remhash (hara-connection-root connection) hara--connections))
+
+(defun hara--detach-connection (connection)
+  "Detach CONNECTION from every Hara source and REPL buffer."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (eq hara--connection connection)
+        (setq-local hara--connection nil)
+        (when (bound-and-true-p hara-connected-mode)
+          (hara-connected-mode -1)))
+      (when (eq hara--repl-connection connection)
+        (setq-local hara--repl-connection nil)))))
+
+;;;###autoload
+(defun hara-interrupt ()
+  "Recover from an evaluation that cannot be interrupted by the server.
+Stop an Emacs-owned server; otherwise close only the client connection."
+  (interactive)
+  (let ((connection (or hara--connection
+                        (gethash (hara--project-root) hara--connections))))
+    (unless connection (user-error "No Hara connection"))
+    (let ((owned (and (hara-connection-server-process connection)
+                      (process-live-p
+                       (hara-connection-server-process connection)))))
+      (maphash
+       (lambda (_id pending)
+         (when-let ((failure (plist-get pending :failure)))
+           (funcall failure '("INTERRUPTED" "Hara evaluation interrupted"))))
+       (hara-connection-pending connection))
+      (clrhash (hara-connection-pending connection))
+      (hara--detach-connection connection)
+      (hara--disconnect connection)
+      (message (if owned
+                   "Hara evaluation interrupted; server stopped—jack in again"
+                 "Hara client disconnected; external server was left running")))))
 
 ;;;###autoload
 (defun hara-disconnect ()
@@ -687,16 +731,10 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
     display))
 
 (defun hara--result-face (type)
-  "Return the result face for TYPE, preferring CIDER's themed faces."
+  "Return the Hara result face for TYPE."
   (pcase type
-    ('error
-     (if (facep 'cider-error-overlay-face)
-         'cider-error-overlay-face
-       'hara-inline-error-face))
-    (_
-     (if (facep 'cider-result-overlay-face)
-         'cider-result-overlay-face
-       'hara-inline-result-face))))
+    ('error 'hara-inline-error-face)
+    (_ 'hara-inline-result-face)))
 
 (defun hara--display-inline (marker value face)
   (when (and (markerp marker) (marker-buffer marker))
@@ -721,9 +759,7 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
              fringe 'before-string
              (propertize " " 'display
                          `(left-fringe empty-line
-                                       ,(if (memq face
-                                                  '(hara-inline-error-face
-                                                    cider-error-overlay-face))
+                                       ,(if (eq face 'hara-inline-error-face)
                                             'hara-inline-error-fringe-face
                                           'hara-inline-fringe-face))))
             (setq hara--result-overlay overlay
@@ -1022,22 +1058,94 @@ so a partial name is never evaluated."
 (cl-defmethod xref-backend-identifier-at-point ((_backend (eql hara)))
   (hara--symbol-at-point))
 
-(cl-defmethod xref-backend-definitions ((_backend (eql hara)) identifier)
-  (let* ((value (hara--request-doc-sync identifier))
-         (file (hara--doc-get value "FILE"))
-         (line (hara--doc-get value "LINE"))
-         (column (hara--doc-get value "COLUMN")))
-    (unless (and (stringp file) (not (string-empty-p file)) line)
-      (user-error "Hara symbol has no source definition: %s" identifier))
-    (unless (file-name-absolute-p file)
-      (setq file (expand-file-name file (hara-connection-root (hara--connection)))))
-    (list (xref-make identifier
+(defun hara--namespace-alias (alias)
+  "Return the namespace assigned to ALIAS in the current buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward
+           (format "\\[\\([^][(){}[:space:]]+\\)[[:space:]\n]+:as[[:space:]\n]+%s\\(?:[[:space:]\n]\\|\\]\\)"
+                   (regexp-quote alias))
+           nil t)
+      (match-string-no-properties 1))))
+
+(defun hara--namespace-file (root namespace)
+  "Find NAMESPACE's local Hara source beneath ROOT."
+  (let* ((key (cons root namespace))
+         (cached (gethash key hara--namespace-file-cache))
+         (relative (concat
+                    (replace-regexp-in-string
+                     "-" "_" (replace-regexp-in-string "\\." "/" namespace))
+                    ".hal")))
+    (if (and cached (file-readable-p cached))
+        cached
+      (let* ((source-roots '("src" "src-lang" "lib/src" "lib/src-lang"
+                             "test" "test-lang" "lib/test" "lib/test-lang"))
+             (file (cl-loop for source-root in source-roots
+                            for candidate = (expand-file-name
+                                             relative
+                                             (expand-file-name source-root root))
+                            when (file-readable-p candidate) return candidate))
+             (file (or file
+                       (cl-find-if
+                        (lambda (candidate)
+                          (string-suffix-p relative candidate))
+                        (directory-files-recursively
+                         root
+                         (concat (regexp-quote (file-name-nondirectory relative))
+                                 "\\'"))))))
+        (when file (puthash key file hara--namespace-file-cache))
+        file))))
+
+(defun hara--local-definition (identifier)
+  "Return a local xref for IDENTIFIER, or nil when it cannot be found."
+  (let* ((parts (split-string identifier "/"))
+         (qualified (> (length parts) 1))
+         (prefix (and qualified (mapconcat #'identity (butlast parts) "/")))
+         (name (car (last parts)))
+         (namespace (and prefix (or (hara--namespace-alias prefix) prefix)))
+         (root (hara--project-root))
+         (file (if namespace
+                   (hara--namespace-file root namespace)
+                 buffer-file-name)))
+    (when (and file (file-readable-p file))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (when (re-search-forward
+               (format
+                "^(\\(?:declare\\|def-?\\|defenum\\|defmacro\\|defmethod\\|defmulti\\|defn-?\\|defprotocol\\|defrecord\\|defstruct\\|deftype\\)[[:space:]\n]+%s\\(?:[[:space:]\n()\\[]\\|$\\)"
+                (regexp-quote name))
+               nil t)
+          (xref-make identifier
                      (xref-make-file-location
-                      file
-                      (if (numberp line) line (string-to-number line))
-                      (max 0 (1- (if (numberp column)
-                                    column
-                                  (string-to-number (or column "1"))))))))))
+                      file (line-number-at-pos (match-beginning 0)) 0)))))))
+
+(defun hara--clear-namespace-file-cache ()
+  "Clear cached project namespace locations after source generation."
+  (clrhash hara--namespace-file-cache))
+
+(with-eval-after-load 'hara-manage
+  (add-hook 'hara-manage-after-write-hook #'hara--clear-namespace-file-cache))
+
+(cl-defmethod xref-backend-definitions ((_backend (eql hara)) identifier)
+  (if-let ((local (hara--local-definition identifier)))
+      (list local)
+    (let* ((value (hara--request-doc-sync identifier))
+           (file (hara--doc-get value "FILE"))
+           (line (hara--doc-get value "LINE"))
+           (column (hara--doc-get value "COLUMN")))
+      (unless (and (stringp file) (not (string-empty-p file)) line)
+        (user-error "Hara symbol has no source definition: %s" identifier))
+      (unless (file-name-absolute-p file)
+        (setq file (expand-file-name file
+                                     (hara-connection-root (hara--connection)))))
+      (list (xref-make identifier
+                       (xref-make-file-location
+                        file
+                        (if (numberp line) line (string-to-number line))
+                        (max 0 (1- (if (numberp column)
+                                      column
+                                    (string-to-number (or column "1")))))))))))
 
 (defconst hara-imenu-generic-expression
   '(("Definitions"
@@ -1161,6 +1269,7 @@ so a partial name is never evaluated."
 (defvar hara-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-j") #'hara-jack-in)
+    (define-key map (kbd "C-c C-b") #'hara-interrupt)
     (define-key map (kbd "C-c C-z") #'hara-repl)
     (define-key map (kbd "C-c C-e") #'hara-eval-last-sexp)
     (define-key map (kbd "C-c C-i") #'hara-eval-last-sexp-and-insert)
@@ -1173,6 +1282,21 @@ so a partial name is never evaluated."
     (define-key map (kbd "C-c C-a") #'hara-test-project)
     (define-key map (kbd "M-.") #'xref-find-definitions)
     map))
+
+(easy-menu-define hara-mode-menu hara-mode-map
+  "Menu for Hara source buffers."
+  '("Hara"
+    ["Import test metadata" hara-manage-import t]
+    ["Scaffold tests" hara-manage-scaffold t]
+    ["Purge imported metadata" hara-manage-purge t]
+    "---"
+    ["Test file" hara-test-file t]
+    ["Test project" hara-test-project t]
+    ["Rerun tests" hara-test-rerun t]
+    "---"
+    ["Jack in" hara-jack-in t]
+    ["Interrupt evaluation" hara-interrupt t]
+    ["REPL" hara-repl t]))
 
 ;;;###autoload
 (define-derived-mode hara-mode prog-mode "Hara"

@@ -93,6 +93,22 @@
       (delete-directory root t)
       (delete-directory hara-cache-directory t))))
 
+(ert-deftest hara-resolve-command-finds-workspace-launcher ()
+  (let* ((root (make-temp-file "hara-workspace-" t))
+         (project (expand-file-name "technology/hara/core/lib" root))
+         (launcher (expand-file-name "extensions/hara-emacs/bin/hara" root))
+         (hara-command "hara"))
+    (unwind-protect
+        (progn
+          (make-directory project t)
+          (make-directory (file-name-directory launcher) t)
+          (with-temp-file launcher (insert "#!/bin/sh\n"))
+          (set-file-modes launcher #o755)
+          (cl-letf (((symbol-function 'hara--project-file-root)
+                     (lambda () project)))
+            (should (equal (hara--resolve-command) launcher))))
+      (delete-directory root t))))
+
 (ert-deftest hara-mode-auto-jacks-in-only-for-project-files ()
   (let* ((root (make-temp-file "hara-auto-project-" t))
          (standalone-root (make-temp-file "hara-standalone-" t))
@@ -162,6 +178,33 @@
                                 "--offline" "project" "test" source)
                           " ")))))))
       (delete-directory root t))))
+
+(ert-deftest hara-manage-compatibility-commands-use-preview-workflow ()
+  (should (eq (symbol-function 'hara-import) 'hara-manage-import))
+  (should (eq (symbol-function 'hara-scaffold) 'hara-manage-scaffold))
+  (should (eq (symbol-function 'hara-purge) 'hara-manage-purge)))
+
+(ert-deftest hara-start-server-loads-the-owning-project ()
+  (let ((root "/tmp/hara-project/")
+        captured-command)
+    (cl-letf (((symbol-function 'hara--resolve-command) (lambda () "hara"))
+              ((symbol-function 'get-buffer-create) (lambda (&rest _) (current-buffer)))
+              ((symbol-function 'erase-buffer) #'ignore)
+              ((symbol-function 'make-process)
+               (lambda (&rest arguments)
+                 (setq captured-command (plist-get arguments :command))
+                 'fake-process))
+              ((symbol-function 'set-process-filter) #'ignore)
+              ((symbol-function 'process-get)
+               (lambda (_process property)
+                 (and (eq property 'hara-endpoint) '("127.0.0.1" . 1311))))
+              ((symbol-function 'hara--open-endpoint)
+               (lambda (&rest _) 'connection)))
+      (should (eq (hara--start-server root) 'connection))
+      (should (equal captured-command
+                     '("hara" "--project" "/tmp/hara-project/"
+                       "--root" "/tmp/hara-project/"
+                       "--host" "127.0.0.1" "--port" "0" "headless"))))))
 
 (ert-deftest hara-mode-installs-built-in-editing-hooks ()
   (with-temp-buffer
@@ -367,6 +410,53 @@
         (should (equal (xref-file-location-file location) "/tmp/sample.hal"))
         (should (= (xref-file-location-line location) 12))
         (should (= (xref-file-location-column location) 2))))))
+
+(ert-deftest hara-xref-prefers-local-hara-source ()
+  (let* ((root (make-temp-file "hara-xref-project-" t))
+         (file (expand-file-name "lib/src/code/manage.hal" root))
+         requested)
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory file) t)
+          (with-temp-file (expand-file-name "project.edn" root) (insert "{}"))
+          (with-temp-file file
+            (insert "(ns code.manage)\n\n(defn scaffold\n  [input]\n  input)\n"))
+          (with-temp-buffer
+            (setq default-directory root)
+            (insert "(ns demo.core)\n(code.manage/scaffold input)\n")
+            (cl-letf (((symbol-function 'hara--request-doc-sync)
+                       (lambda (&rest _) (setq requested t))))
+              (let* ((xref (car (xref-backend-definitions
+                                 'hara "code.manage/scaffold")))
+                     (location (xref-item-location xref)))
+                (should (equal (file-truename (xref-file-location-file location))
+                               (file-truename file)))
+                (should (= (xref-file-location-line location) 3))
+                (should-not requested)))))
+      (delete-directory root t))))
+
+(ert-deftest hara-interrupt-clears-owned-connection ()
+  (let* ((root "/tmp/hara-interrupt/")
+         (pending (make-hash-table :test #'equal))
+         (connection (hara--make-connection
+                      :root root :pending pending
+                      :process 'network :server-process 'server))
+         deleted failed)
+    (puthash "E1" (list :failure (lambda (error) (setq failed error))) pending)
+    (puthash root connection hara--connections)
+    (with-temp-buffer
+      (setq default-directory root)
+      (setq-local hara--connection connection)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'delete-process)
+                 (lambda (process) (push process deleted)))
+                ((symbol-function 'hara--delete-cache) #'ignore))
+        (hara-interrupt))
+      (should-not hara--connection))
+    (should (equal failed '("INTERRUPTED" "Hara evaluation interrupted")))
+    (should-not (gethash root hara--connections))
+    (should (memq 'network deleted))
+    (should (memq 'server deleted))))
 
 (ert-deftest hara-symbol-at-point-handles-hara-symbol-constituents ()
   "Symbol extraction must include all hara identifier characters."
