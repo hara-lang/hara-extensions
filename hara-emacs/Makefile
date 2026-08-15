@@ -1,25 +1,54 @@
-.PHONY: all test compile clean upgrade \
+PREFIX ?= $(HOME)/.local
+DESTDIR ?=
+DATADIR ?= $(PREFIX)/share
+LISPDIR ?= $(DATADIR)/emacs/site-lisp/hara-mode
+INSTALL ?= install
+EMACS ?= emacs
+
+ELISP_SOURCES := hara-mode.el hara-manage.el
+ELISP_COMPILED := $(ELISP_SOURCES:.el=.elc)
+
+.PHONY: all test test-install compile clean install install-files uninstall upgrade \
   bin-build bin-build-truffle bin-build-native bin-build-rust \
   bin-install bin-install-truffle bin-install-native bin-install-rust \
   bin-clean
 
 all: compile test
 
-test:
-	emacs --batch -L . -L test \
+test: test-install
+	$(EMACS) --batch -L . -L test \
 	  -l test/hara-mode-test.el \
 	  -l test/hara-manage-test.el \
 	  -f ert-run-tests-batch-and-exit
 
+test-install:
+	sh test/install-test.sh
+
 compile:
-	emacs --batch -L . -f batch-byte-compile \
-	  hara-mode.el hara-manage.el
+	$(EMACS) --batch -L . -f batch-byte-compile \
+	  $(ELISP_SOURCES)
 
 clean:
-	rm -f hara-mode.elc hara-manage.elc
+	rm -f $(ELISP_COMPILED)
+
+install: compile
+	@$(MAKE) --no-print-directory install-files
+
+install-files:
+	@for file in $(ELISP_SOURCES) $(ELISP_COMPILED); do \
+	  test -f "$$file" || { printf 'Missing install input: %s\n' "$$file" >&2; exit 1; }; \
+	done
+	$(INSTALL) -d "$(DESTDIR)$(LISPDIR)"
+	$(INSTALL) -m 644 $(ELISP_SOURCES) $(ELISP_COMPILED) "$(DESTDIR)$(LISPDIR)/"
+	@printf 'Installed hara-emacs: %s\n' "$(LISPDIR)"
+	@printf 'Ensure this directory is present in Emacs load-path.\n'
+
+uninstall:
+	rm -f $(addprefix $(DESTDIR)$(LISPDIR)/,$(ELISP_SOURCES) $(ELISP_COMPILED))
+	@rmdir "$(DESTDIR)$(LISPDIR)" 2>/dev/null || true
 
 upgrade:
-	emacs --batch \
+	$(EMACS) --batch \
 	  --eval '(require (quote package))' \
 	  --eval '(load-library "package-vc")' \
 	  --eval '(package-initialize)' \
@@ -30,8 +59,8 @@ upgrade:
 # ---------------------------------------------------------------------------
 
 HARA_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../../technology/hara
-LOCAL_BIN := $(HOME)/.local/bin
-LOCAL_SHARE := $(HOME)/.local/share/hara-mode
+LOCAL_BIN ?= $(PREFIX)/bin
+LOCAL_SHARE ?= $(PREFIX)/share/hara-mode
 
 TRUFFLE_JAR_SRC := $(HARA_ROOT)/core/java/target/hara-truffle.jar
 TRUFFLE_JAR_DST := $(LOCAL_SHARE)/hara-truffle.jar
