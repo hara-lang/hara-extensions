@@ -186,15 +186,16 @@
 
 (ert-deftest hara-start-server-loads-the-owning-project ()
   (let ((root "/tmp/hara-project/")
-        captured-command)
+        captured-command
+        captured-filter)
     (cl-letf (((symbol-function 'hara--resolve-command) (lambda () "hara"))
               ((symbol-function 'get-buffer-create) (lambda (&rest _) (current-buffer)))
               ((symbol-function 'erase-buffer) #'ignore)
               ((symbol-function 'make-process)
                (lambda (&rest arguments)
-                 (setq captured-command (plist-get arguments :command))
+                 (setq captured-command (plist-get arguments :command)
+                       captured-filter (plist-get arguments :filter))
                  'fake-process))
-              ((symbol-function 'set-process-filter) #'ignore)
               ((symbol-function 'process-get)
                (lambda (_process property)
                  (and (eq property 'hara-endpoint) '("127.0.0.1" . 1311))))
@@ -204,7 +205,8 @@
       (should (equal captured-command
                      '("hara" "--project" "/tmp/hara-project/"
                        "--root" "/tmp/hara-project/"
-                       "--host" "127.0.0.1" "--port" "0" "headless"))))))
+                       "--host" "127.0.0.1" "--port" "0" "headless")))
+      (should (eq captured-filter #'hara--server-process-filter)))))
 
 (ert-deftest hara-mode-installs-built-in-editing-hooks ()
   (with-temp-buffer

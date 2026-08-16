@@ -503,11 +503,11 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
            :command (list command "--project" root "--root" root
                           "--host" "127.0.0.1"
                           "--port" "0" "headless")
+           :filter #'hara--server-process-filter
            :coding 'utf-8 :noquery t
            :connection-type 'pipe))
          endpoint)
     (message "Starting Hara server: %s" command)
-    (set-process-filter process #'hara--server-process-filter)
     (let ((deadline (+ (float-time) hara-server-start-timeout)))
       (while (and (not (setq endpoint (process-get process 'hara-endpoint)))
                   (process-live-p process)
