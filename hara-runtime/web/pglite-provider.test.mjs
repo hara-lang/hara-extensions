@@ -3,7 +3,7 @@ import test from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { createPgliteProvider } from "./packages/db-pglite/index.mjs";
 
-test("PGlite executes parameterized PostgreSQL through the std.db provider core", async () => {
+test("PGlite executes parameterized PostgreSQL through the db provider core", async () => {
   const pglite = createPgliteProvider(PGlite);
   const opened = await pglite.call("node", "open", [new Map()]);
   assert.equal(opened.engine, "postgresql");

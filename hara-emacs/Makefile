@@ -9,8 +9,8 @@ ELISP_SOURCES := hara-mode.el hara-manage.el
 ELISP_COMPILED := $(ELISP_SOURCES:.el=.elc)
 
 .PHONY: all test test-install compile clean install install-files uninstall upgrade \
-  bin-build bin-build-truffle bin-build-native bin-build-rust \
-  bin-install bin-install-truffle bin-install-native bin-install-rust \
+  bin-build bin-build-truffle bin-build-native bin-build-rust bin-build-rust-lite \
+  bin-install bin-install-truffle bin-install-native bin-install-rust bin-install-rust-lite \
   bin-clean
 
 all: compile test
@@ -66,6 +66,7 @@ TRUFFLE_JAR_SRC := $(HARA_ROOT)/core/java/target/hara-truffle.jar
 TRUFFLE_JAR_DST := $(LOCAL_SHARE)/hara-truffle.jar
 NATIVE_SRC := $(HARA_ROOT)/core/target/hara-truffle
 RUST_SRC := $(HARA_ROOT)/core/rust/target/release/hara
+RUST_LITE_SRC := $(HARA_ROOT)/core/rust/target/release/hara-lite
 
 bin-build: bin-build-truffle
 bin-install: bin-install-truffle
@@ -94,6 +95,15 @@ bin-build-rust:
 bin-install-rust: bin-build-rust
 	mkdir -p "$(LOCAL_BIN)"
 	install -m 755 "$(RUST_SRC)" "$(LOCAL_BIN)/hara-rust"
+
+bin-build-rust-lite:
+	cargo build --release --manifest-path "$(HARA_ROOT)/core/rust/Cargo.toml" --bin hara-lite
+
+bin-install-rust-lite: bin-build-rust-lite
+	mkdir -p "$(LOCAL_BIN)" "$(PREFIX)/share/hara-lite"
+	install -m 755 "$(RUST_LITE_SRC)" "$(LOCAL_BIN)/hara-rust-lite"
+	install -m 644 "$(HARA_ROOT)/core/project.edn" "$(PREFIX)/share/hara-lite/project.edn"
+	cp -R "$(HARA_ROOT)/core/lib" "$(PREFIX)/share/hara-lite/"
 
 bin-clean:
 	rm -f "$(TRUFFLE_JAR_DST)" "$(LOCAL_BIN)/hara-truffle" \

@@ -1,7 +1,7 @@
 {
   "name": "@hara-lang/db-pglite",
   "version": "0.1.0",
-  "description": "PGlite embedded PostgreSQL provider core for Hara std.db",
+  "description": "PGlite embedded PostgreSQL provider core for Hara db",
   "license": "Apache-2.0",
   "type": "module",
   "private": true,

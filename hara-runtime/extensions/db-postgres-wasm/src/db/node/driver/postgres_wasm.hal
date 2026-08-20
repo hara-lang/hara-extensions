@@ -1,0 +1,28 @@
+;; ============================================================================
+;; db.node.driver.postgres-wasm — embedded PostgreSQL runtime driver registration.
+;; ============================================================================
+(ns db.node.driver.postgres-wasm
+  (:require [db.node.kernel-base :as kernel]
+            [db.postgres.wasm :as postgres]))
+
+(def DRIVER-ID :postgres-wasm)
+
+(defn descriptor
+  "Returns the PGlite runtime driver descriptor."
+  []
+  {:id DRIVER-ID
+   :engine :postgresql
+   :open postgres/open
+   :version postgres/version})
+
+(defn install
+  "Registers the PGlite driver on a database runtime node."
+  [node]
+  (kernel/register-driver node DRIVER-ID (descriptor))
+  node)
+
+(defn uninstall
+  "Removes the PGlite driver from a database runtime node."
+  [node]
+  (kernel/unregister-driver node DRIVER-ID)
+  node)

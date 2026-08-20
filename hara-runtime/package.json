@@ -5,14 +5,14 @@
   "type": "module",
   "workspaces": [
     "extensions/ledger-noir",
-    "extensions/std-db-pglite",
-    "extensions/std-db-sqlite",
+    "extensions/db-postgres-wasm",
+    "extensions/db-sqlite-wasm",
     "web/packages/*"
   ],
   "scripts": {
     "build:noir": "cd web && vite build --config vite.noir.config.js && vite build --config vite.noir-node.config.js && vite build --config vite.noir-provider.config.js && node package-noir-extension.mjs",
-    "build:db:pglite": "bash scripts/build-db-pglite-extension",
-    "build:db:sqlite": "bash scripts/build-db-sqlite-extension",
+    "build:db:postgres-wasm": "bash scripts/build-db-postgres-wasm-extension",
+    "build:db:sqlite-wasm": "bash scripts/build-db-sqlite-wasm-extension",
     "test:noir": "npm run build:noir && node --test web/packages/noir/noir.test.mjs web/noir-loader.test.js",
     "test:providers": "node --test web/pglite-provider.test.mjs web/postgres-host-services.test.mjs web/sqlite-provider.test.mjs"
   },

@@ -25,7 +25,7 @@ function selectedProvider(options, environment) {
   return environment === "browser" ? "pglite" : "postgres";
 }
 
-/** Creates the exact host-call surface consumed by std.db.postgres.
+/** Creates the exact host-call surface consumed by db.postgres.
  *
  * `pglite` and `remote` expose `call(environment, operation, args)`. A browser
  * Hestia may omit `remote` or provide an authenticated on-prem transport; this
@@ -130,5 +130,5 @@ export function createPostgresHostServices({ pglite = null, remote = null, envir
     "describe", "open", "close", "version", "exec", "query", "wait-ready",
     "database-create", "database-drop", "server-start", "server-stop", "listen",
     "notification-next", "unlisten", "notify"
-  ].map(operation => [`std.db.postgres/${operation}`, (...args) => call(operation, args)])));
+  ].map(operation => [`db.postgres/${operation}`, (...args) => call(operation, args)])));
 }

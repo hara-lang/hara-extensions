@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import sqlite3InitModule from "../extensions/std-db-sqlite/node_modules/@sqlite.org/sqlite-wasm/node.mjs";
+import sqlite3InitModule from "../node_modules/@sqlite.org/sqlite-wasm/node.mjs";
 import { createSqliteProvider } from "./packages/db-sqlite/index.mjs";
 import { nodeFileSystem } from "./packages/db-sqlite/node-filesystem.mjs";
 import { HtaKeyword } from "@hara-lang/hta";
@@ -15,7 +15,7 @@ const value = (input, name) => {
   return undefined;
 };
 
-test("SQLite WASM executes parameterized SQL through the std.db provider core", async () => {
+test("SQLite WASM executes parameterized SQL through the db provider core", async () => {
   const sqlite = createSqliteProvider(sqlite3InitModule);
   const version = await sqlite.call("node", "version", []);
   assert.equal(version.engine, "sqlite");

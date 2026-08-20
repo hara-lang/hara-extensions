@@ -1,0 +1,13 @@
+(ns db.node.driver.sqlite-jvm
+  (:require [db.node :as db]
+            [db.sqlite.jvm :as sqlite]))
+
+(def DRIVER-ID :sqlite-jvm)
+
+(defn create [options]
+  (db/create-driver
+   DRIVER-ID
+   {:connect (fn [_] (sqlite/open options))
+    :disconnect sqlite/close
+    :exec sqlite/exec
+    :query sqlite/query}))

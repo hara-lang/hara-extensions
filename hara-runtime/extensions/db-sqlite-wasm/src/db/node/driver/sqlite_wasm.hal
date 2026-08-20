@@ -1,0 +1,19 @@
+(ns db.node.driver.sqlite-wasm
+  (:require [db.node.kernel-base :as kernel]
+            [db.sqlite.wasm :as sqlite]))
+
+(def DRIVER-ID :sqlite-wasm)
+
+(defn descriptor []
+  {:id DRIVER-ID
+   :engine :sqlite
+   :open sqlite/open
+   :version sqlite/version})
+
+(defn install [node]
+  (kernel/register-driver node DRIVER-ID (descriptor))
+  node)
+
+(defn uninstall [node]
+  (kernel/unregister-driver node DRIVER-ID)
+  node)

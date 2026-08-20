@@ -18,22 +18,22 @@ function provider(name) {
 test("browser auto-selection uses PGlite and keeps handles opaque", async () => {
   const pglite = provider("pglite");
   const services = createPostgresHostServices({ pglite, environment: "browser" });
-  const opened = await services["std.db.postgres/open"](new Map());
+  const opened = await services["db.postgres/open"](new Map());
   assert.equal(opened.provider, "pglite");
   assert.equal(opened.id, 1);
   const decode = new Map([["decode", "tagged"]]);
-  await services["std.db.postgres/query"](opened.id, "select 1", [], decode);
+  await services["db.postgres/query"](opened.id, "select 1", [], decode);
   assert.equal(pglite.calls.at(-1)[1], "query-options");
   assert.deepEqual(pglite.calls.at(-1)[2], [7, "select 1", [], decode]);
-  assert.equal(await services["std.db.postgres/close"](opened.id), true);
-  await assert.rejects(services["std.db.postgres/query"](opened.id, "select 1", []), /postgres\/connection-closed/);
+  assert.equal(await services["db.postgres/close"](opened.id), true);
+  await assert.rejects(services["db.postgres/query"](opened.id, "select 1", []), /postgres\/connection-closed/);
 });
 
 test("remote options select the injected on-prem transport", async () => {
   const pglite = provider("pglite");
   const remote = provider("postgres");
   const services = createPostgresHostServices({ pglite, remote, environment: "browser" });
-  const opened = await services["std.db.postgres/open"](new Map([["endpoint", "https://hestia.local/db"]]));
+  const opened = await services["db.postgres/open"](new Map([["endpoint", "https://hestia.local/db"]]));
   assert.equal(opened.provider, "postgres");
   assert.equal(remote.calls[0][1], "open");
   assert.equal(pglite.calls.length, 0);
@@ -42,11 +42,11 @@ test("remote options select the injected on-prem transport", async () => {
 test("conflicting provider indicators and unavailable remote providers reject", async () => {
   const services = createPostgresHostServices({ pglite: provider("pglite") });
   await assert.rejects(
-    services["std.db.postgres/open"](new Map([["host", "db"], ["storage", "memory"]])),
+    services["db.postgres/open"](new Map([["host", "db"], ["storage", "memory"]])),
     /postgres\/config-invalid/
   );
   await assert.rejects(
-    services["std.db.postgres/open"](new Map([["endpoint", "https://hestia.local/db"]])),
+    services["db.postgres/open"](new Map([["endpoint", "https://hestia.local/db"]])),
     /postgres\/provider-unavailable/
   );
 });

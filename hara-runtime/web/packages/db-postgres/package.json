@@ -1,7 +1,7 @@
 {
   "name": "@hara-lang/db-postgres",
   "version": "0.1.0",
-  "description": "Provider-neutral PostgreSQL host-call router for Hara std.db",
+  "description": "Provider-neutral PostgreSQL host-call router for Hara db",
   "license": "Apache-2.0",
   "type": "module",
   "private": true,

@@ -1,4 +1,0 @@
-{:adapter :command
- :command ["bash" "scripts/build-db-pglite-extension"]
- :working-directory "../../.."
- :output "target/package/std/db/provider/pglite"}

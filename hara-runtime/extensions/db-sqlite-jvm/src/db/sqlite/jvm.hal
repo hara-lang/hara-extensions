@@ -1,0 +1,57 @@
+;; JVM SQLite is selected explicitly; db.sqlite never selects a backend.
+(ns db.sqlite.jvm
+  (:flavor :jvm)
+  (:import [hara.db.sqlite.jvm SqliteProvider])
+  (:require [db.sqlite.connection :as connection]
+            [std.foundation.promise :as promise]))
+
+(def provider-id :sqlite-jvm)
+
+(defn provider-call [operation & arguments]
+  (promise/run
+   (fn []
+     (apply SqliteProvider/call
+            (cons operation arguments)))))
+
+(def operations
+  {:exec (fn [id sql parameters]
+           (provider-call :exec id sql parameters))
+   :query (fn [id sql parameters]
+            (provider-call :query id sql parameters))
+   :work-call (fn [id operation arguments]
+                (provider-call :work-call id operation arguments))
+   :close (fn [id] (provider-call :close id))})
+
+(defn version [] (provider-call :version))
+
+(defn open
+  ([] (open {}))
+  ([options]
+   (promise/then
+    (provider-call :open options)
+    (fn [descriptor]
+      (connection/create descriptor provider-id operations)))))
+
+(defn exec
+  ([value sql] (connection/exec value sql))
+  ([value sql parameters] (connection/exec value sql parameters)))
+
+(defn query
+  ([value sql] (connection/query value sql))
+  ([value sql parameters] (connection/query value sql parameters)))
+
+(defn close [value] (connection/close value))
+(defn work-call [value operation arguments]
+  (connection/work-call value operation arguments))
+(defn begin [value] (connection/begin value))
+(defn commit [value] (connection/commit value))
+(defn rollback [value] (connection/rollback value))
+
+(def backend
+  {:provider provider-id
+   :open open
+   :version version
+   :exec exec
+   :query query
+   :work-call work-call
+   :close close})

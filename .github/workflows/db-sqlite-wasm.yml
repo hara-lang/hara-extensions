@@ -1,0 +1,48 @@
+name: db.sqlite.wasm
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "hara-runtime/extensions/db-sqlite-wasm/**"
+      - "hara-runtime/web/entries/sqlite-*.mjs"
+      - "hara-runtime/web/packages/db-sqlite/**"
+      - "hara-runtime/web/sqlite-provider.test.mjs"
+      - "hara-runtime/web/vite.sqlite-wasm-*.config.js"
+      - "hara-runtime/web/package-db-provider.mjs"
+      - "hara-runtime/web/package-sqlite-wasm-extension.mjs"
+      - "hara-runtime/scripts/build-db-sqlite-wasm-extension"
+      - ".github/workflows/db-sqlite-wasm.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: db-sqlite-wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sqlite-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: extensions
+      - uses: actions/checkout@v4
+        with:
+          repository: hara-lang/hara
+          path: technology/hara
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: extensions/hara-runtime/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+      - name: Build, test, and assemble SQLite WASM extension
+        working-directory: extensions/hara-runtime
+        run: bash scripts/build-db-sqlite-wasm-extension
+      - name: Execute SQLite and database runtimes through Hara
+        run: mvn -f technology/hara/core/java/pom.xml -Ptruffle -Dtest=hara.truffle.HaraDbRuntimeTest,hara.truffle.HaraSqliteProcessExtensionTest test

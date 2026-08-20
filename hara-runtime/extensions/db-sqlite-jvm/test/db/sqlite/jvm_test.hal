@@ -1,0 +1,20 @@
+(ns db.sqlite.jvm-test
+  (:require [db.protocol :as db]
+            [db.sqlite.jvm :as sqlite]))
+
+(def connection (deref (sqlite/open {:storage :memory})))
+(def created (deref (sqlite/exec connection "create table parity (id integer, name text)")))
+(def inserted (deref (sqlite/exec connection "insert into parity values (?, ?)" [1 "jvm"])))
+(def rows (deref (sqlite/query connection "select id, name from parity")))
+(def info (db/db-info connection))
+(def closed (deref (sqlite/close connection)))
+
+(def results
+  [(test-check "JVM SQLite exposes the shared connection contract"
+               [(:provider info) (:engine info) closed]
+               [:sqlite-jvm :sqlite true])
+   (test-check "JVM SQLite executes parameterised SQL"
+               rows
+               [{"id" 1 "name" "jvm"}])])
+
+results

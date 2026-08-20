@@ -1,0 +1,16 @@
+{:hara/type :project
+ :hara/version "1.0.0"
+ :project/id hara/db-sqlite-jvm
+ :project/version "0.1.0"
+ :project/source-paths ["src"]
+ :project/test-paths ["test"]
+ :project/extension-paths []
+ :project/artifact-paths ["src-java"]
+ :project/capabilities #{:jvm/reflection}
+ :project/dependencies
+ {"hara:hara/base" {:version "^1.0.0"}}
+ :project/runtime-profiles
+ {:jvm {:runtime/native-source-paths ["src-java"]
+        :runtime/target-path "target/jvm/classes"
+        :runtime/dependencies
+        {:maven {org.xerial/sqlite-jdbc {:version "3.53.2.0"}}}}}}

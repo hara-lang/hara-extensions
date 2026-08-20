@@ -15,6 +15,9 @@ function option(options, name, fallback = undefined) {
 function fromHta(value) {
   if (Array.isArray(value)) return value.map(fromHta);
   if (value instanceof Uint8Array) return value;
+  if (value && typeof value === "object" && Array.isArray(value.values)) {
+    return value.values.map(fromHta);
+  }
   if (value instanceof Map) {
     const output = Object.create(null);
     for (const [key, item] of value) {

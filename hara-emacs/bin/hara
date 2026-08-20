@@ -1,7 +1,7 @@
 #!/bin/sh
 # Launcher wrapper used by hara-mode.
 #
-# The backend is selected with HARA_BACKEND (truffle, native, rust).
+# The backend is selected with HARA_BACKEND (truffle, native, rust, rust-lite).
 # It defaults to the Truffle jar, which is the most compatible runtime.
 #
 # Freshly-built artifacts in the repo are preferred over installed copies in
@@ -50,6 +50,9 @@ if [ -x "$HARA_ROOT/core/target/hara-truffle" ] && [ "$BACKEND" = "native" ]; th
 elif [ -x "$HARA_ROOT/core/rust/target/release/hara" ] && [ "$BACKEND" = "rust" ]; then
     diag "using repo rust binary: $HARA_ROOT/core/rust/target/release/hara"
     exec "$HARA_ROOT/core/rust/target/release/hara" "$@"
+elif [ -x "$HARA_ROOT/core/rust/target/release/hara-lite" ] && [ "$BACKEND" = "rust-lite" ]; then
+    diag "using repo rust-lite binary: $HARA_ROOT/core/rust/target/release/hara-lite"
+    exec "$HARA_ROOT/core/rust/target/release/hara-lite" "$@"
 fi
 
 BIN="${HOME}/.local/bin/hara-${BACKEND}"

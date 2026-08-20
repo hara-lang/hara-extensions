@@ -1,0 +1,48 @@
+name: db.postgres.wasm
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "hara-runtime/extensions/db-postgres-wasm/**"
+      - "hara-runtime/web/entries/pglite-*.mjs"
+      - "hara-runtime/web/packages/db-pglite/**"
+      - "hara-runtime/web/pglite-provider.test.mjs"
+      - "hara-runtime/web/vite.postgres-wasm-*.config.js"
+      - "hara-runtime/web/package-db-provider.mjs"
+      - "hara-runtime/web/package-postgres-wasm-extension.mjs"
+      - "hara-runtime/scripts/build-db-postgres-wasm-extension"
+      - ".github/workflows/db-postgres-wasm.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: db-postgres-wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pglite-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: extensions
+      - uses: actions/checkout@v4
+        with:
+          repository: hara-lang/hara
+          path: technology/hara
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: extensions/hara-runtime/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+      - name: Build, test, and assemble PostgreSQL WASM extension
+        working-directory: extensions/hara-runtime
+        run: bash scripts/build-db-postgres-wasm-extension
+      - name: Execute PGlite and database runtimes through Hara
+        run: mvn -f technology/hara/core/java/pom.xml -Ptruffle -Dtest=hara.truffle.HaraDbRuntimeTest,hara.truffle.HaraPgliteProcessExtensionTest test

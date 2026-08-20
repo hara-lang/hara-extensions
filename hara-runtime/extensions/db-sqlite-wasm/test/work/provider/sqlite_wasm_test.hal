@@ -1,0 +1,62 @@
+(ns work.provider.sqlite-wasm-test
+  (:require [work.provider.conformance :as conformance]
+            [work.provider.runtime-conformance :as runtime-conformance]
+            [db.sqlite.wasm :as sqlite]
+            [work.provider.sqlite :as provider]))
+
+(defn provider-boundary-test
+  []
+  (= #{:runs
+       :transactions
+       :events
+       :checkpoints
+       :outbox
+       :persistent}
+     (provider/capabilities)))
+
+(def provider (deref (provider/sqlite-store sqlite/backend {})))
+
+(def store-corpus
+  (conformance/run-store-corpus (fn [] provider)))
+
+(def runtime-provider (deref (provider/sqlite-store sqlite/backend {})))
+
+(def runtime-corpus
+  (runtime-conformance/run-runtime-corpus (fn [] runtime-provider)))
+
+(def closed (deref (provider/close sqlite/backend provider)))
+(def runtime-closed (deref (provider/close sqlite/backend runtime-provider)))
+
+(def results
+  [(test-check
+    "SQLite provider advertises durable operational capabilities"
+    (provider-boundary-test)
+    true)
+   (test-check
+    "SQLite store passes the reusable atomic transition corpus"
+    store-corpus
+    {:idempotent-create true
+     :conflicting-create-rejected true
+     :monotonic-revisions true
+     :failed-cas-no-partial-writes true
+     :checkpoint-event-atomic true
+     :stable-event-ordering true
+     :completed-checkpoint-immutable true
+     :cancellation-visible true
+     :outbox-idempotent-and-acked true})
+   (test-check
+    "SQLite store preserves managed-runtime resume and fork semantics"
+    runtime-corpus
+    {:resumed-result 22
+     :forked-result 28
+     :resume-skips-completed-step true
+     :fork-reuses-prefix true
+     :parent-history-stable true
+     :fork-provenance true
+     :version-mismatch-rejected true
+     :definition-mismatch-rejected true})
+   (test-check "SQLite stores close cleanly"
+               [closed runtime-closed]
+               [true true])])
+
+results
