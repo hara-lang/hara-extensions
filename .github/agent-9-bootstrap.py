@@ -1,0 +1,265 @@
+from pathlib import Path
+import re
+
+path = Path("hara-runtime/modules/db-postgres/src/lib.rs")
+text = path.read_text()
+
+
+def one(old: str, new: str) -> None:
+    global text
+    count = text.count(old)
+    if count != 1:
+        raise RuntimeError(f"expected one replacement, found {count}: {old[:100]!r}")
+    text = text.replace(old, new, 1)
+
+
+one("Value::BigInteger(_) | Value::Decimal(_)", "Value::BigInteger(_)")
+one(
+    """        return Ok(match decode {
+            DecodeMode::Tagged => numeric_tag(text),
+            DecodeMode::Simple => simple_numeric(text),
+        });
+""",
+    """        return match decode {
+            DecodeMode::Tagged => Ok(numeric_tag(text)),
+            DecodeMode::Simple => simple_numeric(text),
+        };
+""",
+)
+
+text, count = re.subn(
+    r"fn simple_numeric\(text: String\) -> Value \{.*?\n\}\n\nfn decode_numeric",
+    """fn numeric_float(text: &str) -> Result<f64, Error> {
+    let value = match text {
+        "NaN" => f64::NAN,
+        "Infinity" => f64::INFINITY,
+        "-Infinity" => f64::NEG_INFINITY,
+        _ => text.parse::<f64>().map_err(|_| {
+            Error::new(
+                "postgres/type-unsupported",
+                "NUMERIC value cannot be converted to Hara Float",
+            )
+        })?,
+    };
+    if value.is_infinite() && !matches!(text, "Infinity" | "-Infinity") {
+        return Err(Error::new(
+            "postgres/type-unsupported",
+            "NUMERIC value is outside the finite Hara Float range",
+        ));
+    }
+    Ok(value)
+}
+
+fn simple_numeric(text: String) -> Result<Value, Error> {
+    let exponent = text.contains('e') || text.contains('E');
+    let integral = text
+        .split_once('.')
+        .filter(|_| !exponent)
+        .map(|(whole, fraction)| fraction.bytes().all(|byte| byte == b'0').then_some(whole))
+        .unwrap_or_else(|| (!text.contains('.') && !exponent).then_some(text.as_str()));
+    if let Some(value) = integral.filter(|value| integer_text(value)) {
+        if let Ok(value) = value.parse::<i64>() {
+            return Ok(Value::Integer(value));
+        }
+        return Ok(Value::BigInteger(value.into()));
+    }
+    Ok(Value::Float(numeric_float(&text)?))
+}
+
+fn decode_numeric""",
+    text,
+    count=1,
+    flags=re.S,
+)
+if count != 1:
+    raise RuntimeError(f"simple_numeric replacement found {count} matches")
+
+one("Value::Decimal(value) | Value::String(value)", "Value::String(value)")
+one("number or decimal string", "number or numeric string")
+one(
+    "Value::BigInteger(value) | Value::Decimal(value) => exact_json_number(value)?",
+    "Value::BigInteger(value) => exact_json_number(value)?",
+)
+
+text, count = re.subn(
+    r"fn json_abi\(value: serde_json::Value\) -> Value \{.*?\n\}\n\n#\[cfg\(test\)\]",
+    """fn json_abi(value: serde_json::Value) -> Result<Value, Error> {
+    Ok(match value {
+        serde_json::Value::Null => Value::Nil,
+        serde_json::Value::Bool(value) => Value::Boolean(value),
+        serde_json::Value::Number(value) => {
+            let text = value.to_string();
+            if integer_text(&text) {
+                text.parse::<i64>()
+                    .map(Value::Integer)
+                    .unwrap_or_else(|_| Value::BigInteger(text))
+            } else {
+                let value = text.parse::<f64>().map_err(|_| {
+                    Error::new(
+                        "postgres/type-unsupported",
+                        "JSON number cannot be converted to Hara Float",
+                    )
+                })?;
+                if !value.is_finite() {
+                    return Err(Error::new(
+                        "postgres/type-unsupported",
+                        "JSON number is outside the finite Hara Float range",
+                    ));
+                }
+                Value::Float(value)
+            }
+        }
+        serde_json::Value::String(value) => Value::String(value),
+        serde_json::Value::Array(values) => Value::Vector(
+            values.into_iter().map(json_abi).collect::<Result<Vec<_>, _>>()?,
+        ),
+        serde_json::Value::Object(values) => Value::Record(
+            values
+                .into_iter()
+                .map(|(key, value)| Ok((key, json_abi(value)?)))
+                .collect::<Result<_, Error>>()?,
+        ),
+    })
+}
+
+#[cfg(test)]""",
+    text,
+    count=1,
+    flags=re.S,
+)
+if count != 1:
+    raise RuntimeError(f"json_abi replacement found {count} matches")
+
+one(
+    """    if *ty == Type::NUMERIC || matches!(ty.kind(), Kind::Array(_)) {
+        let value: Option<RawValue> = row.try_get(index).map_err(query_error)?;
+        return value
+            .map(|value| decode_raw(ty, &value.0, decode))
+            .unwrap_or(Ok(Value::Nil));
+    }
+    match *ty {
+""",
+    """    if *ty == Type::NUMERIC || matches!(ty.kind(), Kind::Array(_)) {
+        let value: Option<RawValue> = row.try_get(index).map_err(query_error)?;
+        return value
+            .map(|value| decode_raw(ty, &value.0, decode))
+            .unwrap_or(Ok(Value::Nil));
+    }
+    if matches!(*ty, Type::JSON | Type::JSONB) {
+        let value: Option<serde_json::Value> = row.try_get(index).map_err(query_error)?;
+        return value.map(json_abi).unwrap_or(Ok(Value::Nil));
+    }
+    match *ty {
+""",
+)
+one("        Type::JSON | Type::JSONB => nullable!(serde_json::Value, json_abi),\n", "")
+one(
+    """    if let Kind::Array(member) = ty.kind() {
+        return decode_array(raw, member, decode);
+    }
+    match *ty {
+""",
+    """    if let Kind::Array(member) = ty.kind() {
+        return decode_array(raw, member, decode);
+    }
+    if matches!(*ty, Type::JSON | Type::JSONB) {
+        let value = <serde_json::Value as FromSql>::from_sql(ty, raw)
+            .map_err(|_| type_error(ty))?;
+        return json_abi(value);
+    }
+    match *ty {
+""",
+)
+one("        Type::JSON | Type::JSONB => scalar!(serde_json::Value, json_abi),\n", "")
+
+start = text.index("    #[test]\n    fn numeric_binary_decoding_and_simple_conversion_are_exact()")
+end = text.index(
+    "\n    #[test]\n    fn array_text_preserves_dimensions_and_rejects_ragged_values()", start
+)
+tests = """    #[test]
+    fn numeric_binary_decoding_and_simple_conversion_are_portable() {
+        let raw = [
+            0, 2, // ndigits
+            0, 0, // weight
+            0, 0, // positive
+            0, 4, // scale
+            0, 12, 13, 72, // 12, 3400
+        ];
+        assert_eq!(decode_numeric(&raw).unwrap(), "12.3400");
+        assert_eq!(simple_numeric("12.000".into()).unwrap(), Value::Integer(12));
+        assert_eq!(simple_numeric("12.3400".into()).unwrap(), Value::Float(12.34));
+        assert_eq!(
+            simple_numeric("9223372036854775808".into()).unwrap(),
+            Value::BigInteger("9223372036854775808".into())
+        );
+        assert_eq!(simple_numeric("1e-3".into()).unwrap(), Value::Float(0.001));
+        assert!(matches!(
+            simple_numeric("NaN".into()).unwrap(),
+            Value::Float(value) if value.is_nan()
+        ));
+        let overflow = simple_numeric("1e10000".into()).unwrap_err();
+        assert_eq!(overflow.code, "postgres/type-unsupported");
+        assert!(overflow.detail.contains("finite Hara Float range"));
+    }
+
+    #[test]
+    fn arbitrary_precision_values_use_integers_or_explicit_numeric_tags() {
+        let big = "92233720368547758081234567890";
+        let decimal = "1234567890.12345678901234567890";
+        assert_eq!(
+            parameter_type(&Value::BigInteger(big.into()), &Type::UNKNOWN).unwrap(),
+            Type::NUMERIC
+        );
+        let tagged = numeric_tag(decimal);
+        assert_eq!(parameter_type(&tagged, &Type::UNKNOWN).unwrap(), Type::NUMERIC);
+        let (_, fields) = postgres_tag(&tagged).unwrap();
+        assert_eq!(numeric_parameter_text(fields.get("value").unwrap()).unwrap(), decimal);
+        assert!(parameter(&tagged, &Type::NUMERIC).is_ok());
+        assert_eq!(numeric_parameter_text(&Value::BigInteger(big.into())).unwrap(), big);
+        assert!(parameter(&Value::BigInteger(big.into()), &Type::INT8).is_err());
+        assert!(parameter(&Value::BigInteger("42".into()), &Type::INT8).is_ok());
+        assert_eq!(
+            array_parameter_text(
+                &Value::Vector(vec![Value::BigInteger(big.into())]),
+                &Type::NUMERIC,
+                None,
+            )
+            .unwrap(),
+            format!("{{{big}}}")
+        );
+        assert_eq!(
+            expect_i64(Some(&Value::BigInteger("42".into())), "value").unwrap(),
+            42
+        );
+        assert!(expect_i64(
+            Some(&Value::BigInteger("9223372036854775808".into())),
+            "value"
+        )
+        .is_err());
+        let encoded_big = abi_json(&Value::BigInteger(big.into())).unwrap();
+        assert_eq!(encoded_big.to_string(), big);
+        assert_eq!(json_abi(encoded_big).unwrap(), Value::BigInteger(big.into()));
+        let encoded_float = abi_json(&Value::Float(1234567890.125)).unwrap();
+        assert_eq!(json_abi(encoded_float).unwrap(), Value::Float(1234567890.125));
+    }
+
+    #[test]
+    fn json_rejects_non_json_or_unrepresentable_numeric_values() {
+        assert!(abi_json(&Value::Float(f64::NAN)).is_err());
+        assert!(abi_json(&Value::BigInteger("not-an-integer".into())).is_err());
+        let oversized = serde_json::from_str::<serde_json::Value>("1e10000").unwrap();
+        let error = json_abi(oversized).unwrap_err();
+        assert_eq!(error.code, "postgres/type-unsupported");
+        assert!(error.detail.contains("finite Hara Float range"));
+    }
+"""
+text = text[:start] + tests + text[end:]
+path.write_text(text)
+
+manifest = Path("hara-runtime/modules/db-postgres/Cargo.toml")
+cargo = manifest.read_text()
+old = "af4e2856ae2580db9c1337044e6e1dc52bc8c30e"
+new = "0e91f6eccf11b1a5c4d48b0d43027b85eeb1298a"
+if cargo.count(old) != 1:
+    raise RuntimeError("expected one hara-abi revision")
+manifest.write_text(cargo.replace(old, new, 1))
