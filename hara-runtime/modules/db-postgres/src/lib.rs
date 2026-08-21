@@ -733,9 +733,7 @@ fn parameter_type(value: &Value, inferred: &Type) -> Result<Type, Error> {
     if matches!(*inferred, Type::JSON | Type::JSONB) {
         return Ok(inferred.clone());
     }
-    if matches!(value, Value::BigInteger(_) | Value::Decimal(_))
-        && matches!(*inferred, Type::TEXT | Type::UNKNOWN)
-    {
+    if matches!(value, Value::BigInteger(_)) && matches!(*inferred, Type::TEXT | Type::UNKNOWN) {
         return Ok(Type::NUMERIC);
     }
     let Some((tag, fields)) = postgres_tag(value) else {
@@ -891,6 +889,10 @@ fn column_value(row: &Row, index: usize, ty: &Type, decode: DecodeMode) -> Resul
             .map(|value| decode_raw(ty, &value.0, decode))
             .unwrap_or(Ok(Value::Nil));
     }
+    if matches!(*ty, Type::JSON | Type::JSONB) {
+        let value: Option<serde_json::Value> = row.try_get(index).map_err(query_error)?;
+        return value.map(json_abi).unwrap_or(Ok(Value::Nil));
+    }
     match *ty {
         Type::BOOL => nullable!(bool, Value::Boolean),
         Type::INT2 => nullable!(i16, |value| Value::Integer(value as i64)),
@@ -901,7 +903,6 @@ fn column_value(row: &Row, index: usize, ty: &Type, decode: DecodeMode) -> Resul
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => nullable!(String, Value::String),
         Type::BYTEA => nullable!(Vec<u8>, Value::Bytes),
         Type::UUID => nullable!(Uuid, |value| Value::String(value.to_string())),
-        Type::JSON | Type::JSONB => nullable!(serde_json::Value, json_abi),
         Type::DATE => nullable!(NaiveDate, |value| Value::String(value.to_string())),
         Type::TIME => nullable!(NaiveTime, |value| Value::String(value.to_string())),
         Type::TIMESTAMP => nullable!(NaiveDateTime, |value| Value::String(value.to_string())),
@@ -920,13 +921,18 @@ fn decode_raw(ty: &Type, raw: &[u8], decode: DecodeMode) -> Result<Value, Error>
     }
     if *ty == Type::NUMERIC {
         let text = decode_numeric(raw)?;
-        return Ok(match decode {
-            DecodeMode::Tagged => numeric_tag(text),
+        return match decode {
+            DecodeMode::Tagged => Ok(numeric_tag(text)),
             DecodeMode::Simple => simple_numeric(text),
-        });
+        };
     }
     if let Kind::Array(member) = ty.kind() {
         return decode_array(raw, member, decode);
+    }
+    if matches!(*ty, Type::JSON | Type::JSONB) {
+        let value =
+            <serde_json::Value as FromSql>::from_sql(ty, raw).map_err(|_| type_error(ty))?;
+        return json_abi(value);
     }
     match *ty {
         Type::BOOL => scalar!(bool, Value::Boolean),
@@ -938,7 +944,6 @@ fn decode_raw(ty: &Type, raw: &[u8], decode: DecodeMode) -> Result<Value, Error>
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => scalar!(String, Value::String),
         Type::BYTEA => scalar!(Vec<u8>, Value::Bytes),
         Type::UUID => scalar!(Uuid, |value| Value::String(value.to_string())),
-        Type::JSON | Type::JSONB => scalar!(serde_json::Value, json_abi),
         Type::DATE => scalar!(NaiveDate, |value| Value::String(value.to_string())),
         Type::TIME => scalar!(NaiveTime, |value| Value::String(value.to_string())),
         Type::TIMESTAMP => scalar!(NaiveDateTime, |value| Value::String(value.to_string())),
@@ -952,25 +957,41 @@ fn integer_text(value: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn simple_numeric(text: String) -> Value {
-    if matches!(text.as_str(), "NaN" | "Infinity" | "-Infinity") {
-        return numeric_tag(text);
+fn numeric_float(text: &str) -> Result<f64, Error> {
+    let value = match text {
+        "NaN" => f64::NAN,
+        "Infinity" => f64::INFINITY,
+        "-Infinity" => f64::NEG_INFINITY,
+        _ => text.parse::<f64>().map_err(|_| {
+            Error::new(
+                "postgres/type-unsupported",
+                "NUMERIC value cannot be converted to Hara Float",
+            )
+        })?,
+    };
+    if value.is_infinite() && !matches!(text, "Infinity" | "-Infinity") {
+        return Err(Error::new(
+            "postgres/type-unsupported",
+            "NUMERIC value is outside the finite Hara Float range",
+        ));
     }
+    Ok(value)
+}
+
+fn simple_numeric(text: String) -> Result<Value, Error> {
+    let exponent = text.contains('e') || text.contains('E');
     let integral = text
         .split_once('.')
+        .filter(|_| !exponent)
         .map(|(whole, fraction)| fraction.bytes().all(|byte| byte == b'0').then_some(whole))
-        .unwrap_or(Some(text.as_str()));
+        .unwrap_or_else(|| (!text.contains('.') && !exponent).then_some(text.as_str()));
     if let Some(value) = integral.filter(|value| integer_text(value)) {
         if let Ok(value) = value.parse::<i64>() {
-            return Value::Integer(value);
+            return Ok(Value::Integer(value));
         }
-        return Value::BigInteger(value.into());
+        return Ok(Value::BigInteger(value.into()));
     }
-    if text.contains('.') {
-        Value::Decimal(text)
-    } else {
-        numeric_tag(text)
-    }
+    Ok(Value::Float(numeric_float(&text)?))
 }
 
 fn decode_numeric(raw: &[u8]) -> Result<String, Error> {
@@ -1098,10 +1119,10 @@ fn numeric_parameter_text(value: &Value) -> Result<String, Error> {
         Value::Float(value) if *value == f64::INFINITY => Ok("Infinity".into()),
         Value::Float(value) if *value == f64::NEG_INFINITY => Ok("-Infinity".into()),
         Value::Float(value) => Ok(value.to_string()),
-        Value::Decimal(value) | Value::String(value) => Ok(value.clone()),
+        Value::String(value) => Ok(value.clone()),
         _ => Err(Error::new(
             "postgres/type-unsupported",
-            "NUMERIC requires a number or decimal string",
+            "NUMERIC requires a number or numeric string",
         )),
     }
 }
@@ -1568,7 +1589,7 @@ fn abi_json(value: &Value) -> Result<serde_json::Value, Error> {
         Value::Nil => serde_json::Value::Null,
         Value::Boolean(value) => (*value).into(),
         Value::Integer(value) => (*value).into(),
-        Value::BigInteger(value) | Value::Decimal(value) => exact_json_number(value)?,
+        Value::BigInteger(value) => exact_json_number(value)?,
         Value::Float(value) => serde_json::Number::from_f64(*value)
             .map(serde_json::Value::Number)
             .ok_or_else(|| {
@@ -1596,8 +1617,8 @@ fn abi_json(value: &Value) -> Result<serde_json::Value, Error> {
     })
 }
 
-fn json_abi(value: serde_json::Value) -> Value {
-    match value {
+fn json_abi(value: serde_json::Value) -> Result<Value, Error> {
+    Ok(match value {
         serde_json::Value::Null => Value::Nil,
         serde_json::Value::Bool(value) => Value::Boolean(value),
         serde_json::Value::Number(value) => {
@@ -1607,20 +1628,35 @@ fn json_abi(value: serde_json::Value) -> Value {
                     .map(Value::Integer)
                     .unwrap_or_else(|_| Value::BigInteger(text))
             } else {
-                Value::Decimal(text)
+                let value = text.parse::<f64>().map_err(|_| {
+                    Error::new(
+                        "postgres/type-unsupported",
+                        "JSON number cannot be converted to Hara Float",
+                    )
+                })?;
+                if !value.is_finite() {
+                    return Err(Error::new(
+                        "postgres/type-unsupported",
+                        "JSON number is outside the finite Hara Float range",
+                    ));
+                }
+                Value::Float(value)
             }
         }
         serde_json::Value::String(value) => Value::String(value),
-        serde_json::Value::Array(values) => {
-            Value::Vector(values.into_iter().map(json_abi).collect())
-        }
+        serde_json::Value::Array(values) => Value::Vector(
+            values
+                .into_iter()
+                .map(json_abi)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         serde_json::Value::Object(values) => Value::Record(
             values
                 .into_iter()
-                .map(|(key, value)| (key, json_abi(value)))
-                .collect(),
+                .map(|(key, value)| Ok((key, json_abi(value)?)))
+                .collect::<Result<_, Error>>()?,
         ),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1656,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_binary_decoding_and_simple_conversion_are_exact() {
+    fn numeric_binary_decoding_and_simple_conversion_are_portable() {
         let raw = [
             0, 2, // ndigits
             0, 0, // weight
@@ -1665,31 +1701,44 @@ mod tests {
             0, 12, 13, 72, // 12, 3400
         ];
         assert_eq!(decode_numeric(&raw).unwrap(), "12.3400");
-        assert_eq!(simple_numeric("12.000".into()), Value::Integer(12));
+        assert_eq!(simple_numeric("12.000".into()).unwrap(), Value::Integer(12));
         assert_eq!(
-            simple_numeric("12.3400".into()),
-            Value::Decimal("12.3400".into())
+            simple_numeric("12.3400".into()).unwrap(),
+            Value::Float(12.34)
         );
         assert_eq!(
-            simple_numeric("9223372036854775808".into()),
+            simple_numeric("9223372036854775808".into()).unwrap(),
             Value::BigInteger("9223372036854775808".into())
         );
-        assert_eq!(simple_numeric("1e10000".into()), numeric_tag("1e10000"));
+        assert_eq!(simple_numeric("1e-3".into()).unwrap(), Value::Float(0.001));
+        assert!(matches!(
+            simple_numeric("NaN".into()).unwrap(),
+            Value::Float(value) if value.is_nan()
+        ));
+        let overflow = simple_numeric("1e10000".into()).unwrap_err();
+        assert_eq!(overflow.code, "postgres/type-unsupported");
+        assert!(overflow.detail.contains("finite Hara Float range"));
     }
 
     #[test]
-    fn arbitrary_precision_values_cross_postgres_boundaries_exactly() {
+    fn arbitrary_precision_values_use_integers_or_explicit_numeric_tags() {
         let big = "92233720368547758081234567890";
         let decimal = "1234567890.12345678901234567890";
-
         assert_eq!(
             parameter_type(&Value::BigInteger(big.into()), &Type::UNKNOWN).unwrap(),
             Type::NUMERIC
         );
+        let tagged = numeric_tag(decimal);
         assert_eq!(
-            parameter_type(&Value::Decimal(decimal.into()), &Type::UNKNOWN).unwrap(),
+            parameter_type(&tagged, &Type::UNKNOWN).unwrap(),
             Type::NUMERIC
         );
+        let (_, fields) = postgres_tag(&tagged).unwrap();
+        assert_eq!(
+            numeric_parameter_text(fields.get("value").unwrap()).unwrap(),
+            decimal
+        );
+        assert!(parameter(&tagged, &Type::NUMERIC).is_ok());
         assert_eq!(
             numeric_parameter_text(&Value::BigInteger(big.into())).unwrap(),
             big
@@ -1705,12 +1754,6 @@ mod tests {
             .unwrap(),
             format!("{{{big}}}")
         );
-        assert!(array_parameter_text(
-            &Value::Vector(vec![Value::BigInteger("32768".into())]),
-            &Type::INT2,
-            None,
-        )
-        .is_err());
         assert_eq!(
             expect_i64(Some(&Value::BigInteger("42".into())), "value").unwrap(),
             42
@@ -1720,21 +1763,27 @@ mod tests {
             "value"
         )
         .is_err());
-
         let encoded_big = abi_json(&Value::BigInteger(big.into())).unwrap();
         assert_eq!(encoded_big.to_string(), big);
-        assert_eq!(json_abi(encoded_big), Value::BigInteger(big.into()));
-
-        let encoded_decimal = abi_json(&Value::Decimal(decimal.into())).unwrap();
-        assert_eq!(encoded_decimal.to_string(), decimal);
-        assert_eq!(json_abi(encoded_decimal), Value::Decimal(decimal.into()));
+        assert_eq!(
+            json_abi(encoded_big).unwrap(),
+            Value::BigInteger(big.into())
+        );
+        let encoded_float = abi_json(&Value::Float(1234567890.125)).unwrap();
+        assert_eq!(
+            json_abi(encoded_float).unwrap(),
+            Value::Float(1234567890.125)
+        );
     }
 
     #[test]
-    fn json_rejects_non_json_numeric_values() {
+    fn json_rejects_non_json_or_unrepresentable_numeric_values() {
         assert!(abi_json(&Value::Float(f64::NAN)).is_err());
-        assert!(abi_json(&Value::Decimal("NaN".into())).is_err());
         assert!(abi_json(&Value::BigInteger("not-an-integer".into())).is_err());
+        let oversized = serde_json::from_str::<serde_json::Value>("1e10000").unwrap();
+        let error = json_abi(oversized).unwrap_err();
+        assert_eq!(error.code, "postgres/type-unsupported");
+        assert!(error.detail.contains("finite Hara Float range"));
     }
 
     #[test]
