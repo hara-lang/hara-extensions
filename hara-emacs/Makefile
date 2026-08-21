@@ -83,7 +83,7 @@ bin-install-truffle: bin-build-truffle
 	chmod 755 "$(LOCAL_BIN)/hara-truffle"
 
 bin-build-native:
-	bash "$(HARA_ROOT)/packaging/scripts/build-truffle-native"
+	bash "$(HARA_ROOT)/scripts/runtime/build-truffle-native"
 
 bin-install-native: bin-build-native
 	mkdir -p "$(LOCAL_BIN)"
@@ -107,4 +107,5 @@ bin-install-rust-lite: bin-build-rust-lite
 
 bin-clean:
 	rm -f "$(TRUFFLE_JAR_DST)" "$(LOCAL_BIN)/hara-truffle" \
-	      "$(LOCAL_BIN)/hara-native" "$(LOCAL_BIN)/hara-rust"
+	      "$(LOCAL_BIN)/hara-native" "$(LOCAL_BIN)/hara-rust" \
+	      "$(LOCAL_BIN)/hara-rust-lite"

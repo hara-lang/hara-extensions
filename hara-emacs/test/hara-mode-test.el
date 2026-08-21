@@ -179,6 +179,30 @@
                           " ")))))))
       (delete-directory root t))))
 
+(ert-deftest hara-source-test-counterpart-supports-native-layouts ()
+  (let* ((root (make-temp-file "hara-pair-project-" t))
+         (source (expand-file-name "lib/src/tool/example.hal" root))
+         (test (expand-file-name "lib/test/tool/example_test.hal" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (make-directory (file-name-directory test) t)
+          (with-temp-file (expand-file-name "project.edn" root) (insert "{}"))
+          (with-temp-file source (insert "(ns tool.example)"))
+          (with-temp-file test (insert "(ns tool.example-test)"))
+          (with-temp-buffer
+            (setq-local buffer-file-name source)
+            (should (equal (hara--source-test-counterpart source)
+                           (file-truename test)))
+            (should (equal (hara--focused-test-file source)
+                           (file-truename test))))
+          (with-temp-buffer
+            (setq-local buffer-file-name test)
+            (should (equal (hara--source-test-counterpart test)
+                           (file-truename source)))
+            (should (equal (hara--focused-test-file test) test))))
+      (delete-directory root t))))
+
 (ert-deftest hara-manage-compatibility-commands-use-preview-workflow ()
   (should (eq (symbol-function 'hara-import) 'hara-manage-import))
   (should (eq (symbol-function 'hara-scaffold) 'hara-manage-scaffold))
@@ -394,6 +418,61 @@
                      (list "(+ 1 2)" "FILE" (file-truename "/tmp/sample.hal")
                            "LINE" "2" "COLUMN" "3"))))))
 
+(ert-deftest hara-buffer-namespace-context-preserves-the-complete-ns-form ()
+  (with-temp-buffer
+    (hara-mode)
+    (insert "; heading\n"
+            "(ns sample.core\n"
+            "  (:require [std.foundation.string :as str]))\n\n"
+            "(def answer 42)\n")
+    (let ((context (hara--buffer-namespace-context)))
+      (should (equal (plist-get context :name) "sample.core"))
+      (should (equal (plist-get context :source)
+                     (concat "(ns sample.core\n"
+                             "  (:require [std.foundation.string :as str]))")))
+      (should (= (plist-get context :start) 11)))))
+
+(ert-deftest hara-eval-synchronises-the-buffer-namespace-before-the-form ()
+  (with-temp-buffer
+    (setq-local buffer-file-name "/tmp/sample.hal")
+    (insert "(ns sample.core\n  (:require [std.foundation.string :as str]))\n"
+            "(def answer (str/upper \"ok\"))")
+    (let ((connection
+           (hara--make-connection
+            :namespace "other.core"
+            :pending (make-hash-table :test #'equal)))
+          requests
+          result)
+      (cl-letf (((symbol-function 'hara--request)
+                 (lambda (_connection operation arguments success &optional _failure)
+                   (push (cons operation arguments) requests)
+                   (funcall success (if (= (length requests) 1) "sample.core" "value")))))
+        (hara--eval-in-buffer-namespace
+         connection '("(def answer 42)")
+         (lambda (value) (setq result value)) #'ignore))
+      (setq requests (nreverse requests))
+      (should (equal (mapcar #'car requests) '("EVAL" "EVAL")))
+      (should (string-prefix-p "(ns sample.core" (cadr (car requests))))
+      (should (equal (cdr (cadr requests)) '("(def answer 42)")))
+      (should (equal (hara-connection-namespace connection) "sample.core"))
+      (should (equal result "value")))))
+
+(ert-deftest hara-eval-reuses-an-already-synchronised-namespace ()
+  (with-temp-buffer
+    (insert "(ns sample.core)\n(def answer 42)")
+    (let ((connection
+           (hara--make-connection
+            :namespace "sample.core"
+            :pending (make-hash-table :test #'equal)))
+          requests)
+      (cl-letf (((symbol-function 'hara--request)
+                 (lambda (_connection operation arguments success &optional _failure)
+                   (push (cons operation arguments) requests)
+                   (funcall success "value"))))
+        (hara--eval-in-buffer-namespace
+         connection '("(def answer 42)") #'ignore #'ignore))
+      (should (equal requests '(("EVAL" "(def answer 42)")))))))
+
 (ert-deftest hara-xref-builds-source-location-from-doc-response ()
   (let ((hara--connection
          (hara--make-connection :root "/tmp/" :pending (make-hash-table))))
@@ -459,6 +538,60 @@
     (should-not (gethash root hara--connections))
     (should (memq 'network deleted))
     (should (memq 'server deleted))))
+
+(ert-deftest hara-connected-mode-keeps-the-project-server-alive-between-buffers ()
+  (let ((connection
+         (hara--make-connection
+          :root "/tmp/hara-persistent/" :process 'network
+          :server-process 'server :refs 0))
+        disconnected)
+    (with-temp-buffer
+      (setq-local hara--connection connection)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'hara--disconnect)
+                 (lambda (_) (setq disconnected t))))
+        (hara-connected-mode 1)
+        (hara-connected-mode -1)))
+    (should (= (hara-connection-refs connection) 0))
+    (should-not disconnected)))
+
+(ert-deftest hara-dead-process-detaches-the-stale-project-connection ()
+  (let* ((root "/tmp/hara-dead-process/")
+         (connection
+          (hara--make-connection
+           :root root :pending (make-hash-table :test #'equal) :refs 0))
+         (buffer (generate-new-buffer " *hara-dead-process-test*")))
+    (unwind-protect
+        (progn
+          (puthash root connection hara--connections)
+          (with-current-buffer buffer
+            (setq-local hara--connection connection)
+            (hara-connected-mode 1))
+          (cl-letf (((symbol-function 'process-live-p) (lambda (_) nil))
+                    ((symbol-function 'process-get)
+                     (lambda (_process property)
+                       (and (eq property 'hara-connection) connection))))
+            (hara--process-sentinel 'dead "connection broken\n"))
+          (with-current-buffer buffer
+            (should-not hara--connection)
+            (should-not hara-connected-mode))
+          (should (= (hara-connection-refs connection) 0))
+          (should-not (gethash root hara--connections)))
+      (remhash root hara--connections)
+      (kill-buffer buffer))))
+
+(ert-deftest hara-repl-buffers-are-project-specific ()
+  (let* ((first (hara--make-connection :root "/tmp/project-a/"))
+         (second (hara--make-connection :root "/tmp/project-b/"))
+         (first-buffer (hara--repl-buffer first))
+         (second-buffer (hara--repl-buffer second)))
+    (unwind-protect
+        (progn
+          (should-not (eq first-buffer second-buffer))
+          (should (equal (buffer-name first-buffer) "*Hara REPL project-a*"))
+          (should (equal (buffer-name second-buffer) "*Hara REPL project-b*")))
+      (kill-buffer first-buffer)
+      (kill-buffer second-buffer))))
 
 (ert-deftest hara-symbol-at-point-handles-hara-symbol-constituents ()
   "Symbol extraction must include all hara identifier characters."

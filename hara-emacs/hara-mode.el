@@ -148,7 +148,8 @@ Set this to nil to retain results until the next edit or evaluation."
 (define-error 'hara-resp-error "RESP protocol error")
 
 (cl-defstruct (hara-connection (:constructor hara--make-connection))
-  root host port process server-process pending counter session instance project refs doc-cache)
+  root host port process server-process pending counter session namespace instance project
+  refs doc-cache repl-buffer)
 
 (defvar hara--connections (make-hash-table :test #'equal))
 (defvar hara--namespace-file-cache (make-hash-table :test #'equal))
@@ -272,6 +273,7 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
              (funcall failure (string-trim event))))
          (hara-connection-pending connection))
         (clrhash (hara-connection-pending connection))
+        (hara--detach-connection connection)
         (when (eq (gethash (hara-connection-root connection) hara--connections)
                   connection)
           (remhash (hara-connection-root connection) hara--connections))))))
@@ -332,19 +334,86 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
                        (and file (list (expand-file-name file))))
                " ")))
 
+(defconst hara--source-test-layouts
+  '(("lib/src-lang/" . "lib/test-lang/")
+    ("lib/src/" . "lib/test/")
+    ("src-lang/" . "test-lang/")
+    ("src/" . "test/"))
+  "Conventional Hara source and test directory pairs.")
+
+(defun hara--source-test-counterpart (file)
+  "Return the conventional source or test counterpart for FILE.
+The result need not exist.  Return nil when FILE is outside a recognised
+Hara source or test layout."
+  (when-let ((root (hara--project-file-root)))
+    (let ((relative (file-relative-name
+                     (if (file-exists-p file)
+                         (file-truename file)
+                       (expand-file-name file))
+                     root))
+          counterpart)
+      (dolist (layout hara--source-test-layouts)
+        (let ((source-root (car layout))
+              (test-root (cdr layout)))
+          (cond
+           ((and (not counterpart) (string-prefix-p source-root relative))
+            (let* ((source-relative (substring relative (length source-root)))
+                   (extension (file-name-extension source-relative t))
+                   (stem (file-name-sans-extension source-relative)))
+              (setq counterpart
+                    (expand-file-name
+                     (concat test-root stem "_test" extension) root))))
+           ((and (not counterpart) (string-prefix-p test-root relative))
+            (let* ((test-relative (substring relative (length test-root)))
+                   (extension (file-name-extension test-relative t))
+                   (stem (file-name-sans-extension test-relative)))
+              (when (string-suffix-p "_test" stem)
+                (setq counterpart
+                      (expand-file-name
+                       (concat source-root
+                               (substring stem 0 (- (length stem) 5))
+                               extension)
+                       root))))))))
+      counterpart)))
+
+(defun hara--focused-test-file (file)
+  "Return the focused test target associated with FILE."
+  (let ((counterpart (hara--source-test-counterpart file)))
+    (if (and counterpart (file-readable-p counterpart)
+             (string-match-p "_test\\.hal\\'" counterpart))
+        counterpart
+      file)))
+
+;;;###autoload
+(defun hara-toggle-source-test ()
+  "Visit the conventional source or test counterpart of the current file."
+  (interactive)
+  (unless buffer-file-name
+    (user-error "Current buffer has no file"))
+  (let ((counterpart (hara--source-test-counterpart buffer-file-name)))
+    (unless counterpart
+      (user-error "Current file is outside a recognised Hara source/test layout"))
+    (unless (file-readable-p counterpart)
+      (user-error "No counterpart at %s; scaffold the test first" counterpart))
+    (find-file counterpart)))
+
 (defalias 'hara-import #'hara-manage-import)
 (defalias 'hara-scaffold #'hara-manage-scaffold)
 (defalias 'hara-purge #'hara-manage-purge)
 
 (defun hara-test-file ()
-  "Run the current Hara file through the native project test command."
+  "Run the current Hara file's focused test in a fresh native process.
+When invoked from a source file with an existing conventional test counterpart,
+run that test file."
   (interactive)
   (unless buffer-file-name
     (user-error "Current buffer has no file"))
   (save-buffer)
-  (compilation-start (hara--test-command buffer-file-name)
-                     'compilation-mode
-                     (lambda (_) "*Hara test*")))
+  (let ((target (hara--focused-test-file buffer-file-name)))
+    (message "Hara test: %s" (file-relative-name target (hara--project-file-root)))
+    (compilation-start (hara--test-command target)
+                       'compilation-mode
+                       (lambda (_) "*Hara test*"))))
 
 (defun hara-test-project ()
   "Run all tests in the current Hara project."
@@ -582,9 +651,9 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (eq hara--connection connection)
-        (setq-local hara--connection nil)
         (when (bound-and-true-p hara-connected-mode)
-          (hara-connected-mode -1)))
+          (hara-connected-mode -1))
+        (setq-local hara--connection nil))
       (when (eq hara--repl-connection connection)
         (setq-local hara--repl-connection nil)))))
 
@@ -618,10 +687,9 @@ Stop an Emacs-owned server; otherwise close only the client connection."
   (let ((connection (or hara--connection
                         (gethash (hara--project-root) hara--connections))))
     (unless connection (user-error "No Hara connection"))
-    (hara-connected-mode -1)
+    (hara--detach-connection connection)
     (when (gethash (hara-connection-root connection) hara--connections)
       (hara--disconnect connection))
-    (setq-local hara--connection nil)
     (message "Hara disconnected")))
 
 (defun hara--connection ()
@@ -725,7 +793,7 @@ Stop an Emacs-owned server; otherwise close only the client connection."
     (when (> (length display) threshold)
       (setq display
             (concat (substring display 0 threshold)
-                    "…\nResult truncated; see *Hara REPL* for the full value.")))
+                    "…\nResult truncated; see the project Hara REPL for the full value.")))
     (add-face-text-property 0 (length display) face nil display)
     (put-text-property 0 1 'cursor 0 display)
     display))
@@ -779,10 +847,11 @@ Stop an Emacs-owned server; otherwise close only the client connection."
   (message "=> %s" value)
   (when marker
     (hara--display-inline marker value (hara--result-face 'result)))
-  (when-let ((buffer (get-buffer "*Hara REPL*")))
-    (with-current-buffer buffer
-      (when (eq hara--repl-connection connection)
-        (hara--repl-insert (format "=> %s\n" value))))))
+  (when-let ((buffer (hara-connection-repl-buffer connection)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (eq hara--repl-connection connection)
+          (hara--repl-insert (format "=> %s\n" value)))))))
 
 (defun hara--source-arguments (source start)
   (let ((arguments (list source)))
@@ -795,21 +864,61 @@ Stop an Emacs-owned server; otherwise close only the client connection."
                         "COLUMN" (number-to-string (1+ (current-column))))))
       arguments)))
 
+(defun hara--buffer-namespace-context ()
+  "Return the current buffer's namespace name, source, and starting point."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((case-fold-search nil))
+      (when (re-search-forward
+             "^[[:space:]]*(ns\\(?:+\\)?[[:space:]\n]+\\([^][(){}[:space:]]+\\)"
+             nil t)
+        (let* ((name (string-trim (match-string-no-properties 1)))
+               (start (match-beginning 0))
+               (open (save-excursion
+                       (goto-char start)
+                       (search-forward "(" nil t)
+                       (1- (point))))
+               (end (and open (ignore-errors (scan-sexps open 1)))))
+          (when end
+            (list :name name
+                  :source (buffer-substring-no-properties open end)
+                  :start open)))))))
+
+(defun hara--eval-in-buffer-namespace
+    (connection arguments success failure)
+  "Evaluate ARGUMENTS after synchronising CONNECTION to this buffer's namespace."
+  (let ((context (hara--buffer-namespace-context)))
+    (if (or (null context)
+            (equal (plist-get context :name)
+                   (hara-connection-namespace connection)))
+        (hara--request connection "EVAL" arguments success failure)
+      (let ((namespace (plist-get context :name))
+            (namespace-arguments
+             (hara--source-arguments (plist-get context :source)
+                                     (plist-get context :start))))
+        (hara--request
+         connection "EVAL" namespace-arguments
+         (lambda (_)
+           (setf (hara-connection-namespace connection) namespace)
+           (hara--request connection "EVAL" arguments success failure))
+         failure)))))
+
 (defun hara--eval (source &optional start end)
   (let* ((connection (hara--connection))
          (arguments (hara--source-arguments source start))
          (marker (and end (copy-marker end t))))
     (hara--clear-result-overlay)
-    (hara--request connection "EVAL" arguments
-                   (lambda (value)
-                     (hara--display-result connection value marker)
-                     (when (markerp marker) (set-marker marker nil)))
-                   (lambda (error)
-                     (hara--show-error error)
-                     (hara--display-inline
-                      marker (format "%s: %s" (car error) (cadr error))
-                      (hara--result-face 'error))
-                     (when (markerp marker) (set-marker marker nil))))))
+    (hara--eval-in-buffer-namespace
+     connection arguments
+     (lambda (value)
+       (hara--display-result connection value marker)
+       (when (markerp marker) (set-marker marker nil)))
+     (lambda (error)
+       (hara--show-error error)
+       (hara--display-inline
+        marker (format "%s: %s" (car error) (cadr error))
+        (hara--result-face 'error))
+       (when (markerp marker) (set-marker marker nil))))))
 
 ;;;###autoload
 (defun hara-eval-region (start end)
@@ -849,16 +958,20 @@ so a partial name is never evaluated."
   (let ((bounds (hara--last-sexp-bounds))
         (insertion-point (point))
         (buffer (current-buffer)))
-    (hara--request (hara--connection) "EVAL"
-                   (list (buffer-substring-no-properties (car bounds) (cdr bounds)))
-                   (lambda (value)
-                     (when (buffer-live-p buffer)
-                       (with-current-buffer buffer
-                         (save-excursion
-                           (goto-char insertion-point)
-                           (insert value)))))
-                   (lambda (error)
-                     (hara--show-error error)))))
+    (let ((connection (hara--connection)))
+      (hara--eval-in-buffer-namespace
+       connection
+       (hara--source-arguments
+        (buffer-substring-no-properties (car bounds) (cdr bounds))
+        (car bounds))
+       (lambda (value)
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (save-excursion
+               (goto-char insertion-point)
+               (insert value)))))
+       (lambda (error)
+         (hara--show-error error))))))
 
 ;;;###autoload
 (defun hara-eval-defun ()
@@ -1163,7 +1276,8 @@ so a partial name is never evaluated."
     (hara--request
      connection "SESSION" (list "ATTACH" selected)
      (lambda (_)
-       (setf (hara-connection-session connection) selected)
+       (setf (hara-connection-session connection) selected
+             (hara-connection-namespace connection) nil)
        (force-mode-line-update t)
        (message "Hara session: %s" selected)))))
 
@@ -1194,25 +1308,42 @@ so a partial name is never evaluated."
     (goto-char (point-max))))
 
 (defun hara--repl-input-sender (_process input)
-  (let ((connection hara--repl-connection))
+  (let ((connection hara--repl-connection)
+        (buffer (current-buffer)))
     (hara--request
      connection "EVAL" (list input)
      (lambda (value)
-       (with-current-buffer "*Hara REPL*"
-         (hara--repl-insert (format "=> %s\n[%s] "
-                                    value
-                                    (hara-connection-session connection)))))
+       (setf (hara-connection-namespace connection) nil)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (hara--repl-insert (format "=> %s\n[%s] "
+                                      value
+                                      (hara-connection-session connection))))))
      (lambda (error)
-       (with-current-buffer "*Hara REPL*"
-         (hara--repl-insert
-          (format "ERROR %s: %s\n[%s] "
-                  (car error) (cadr error)
-                  (hara-connection-session connection))))))))
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (hara--repl-insert
+            (format "ERROR %s: %s\n[%s] "
+                    (car error) (cadr error)
+                    (hara-connection-session connection)))))))))
 
 (define-derived-mode hara-repl-mode comint-mode "Hara-REPL"
   "Comint mode for a Hara RESP session."
   (setq-local comint-prompt-regexp "^\\[[^]]+\\] ")
   (setq-local comint-input-sender #'hara--repl-input-sender))
+
+(defun hara--repl-buffer (connection)
+  "Return CONNECTION's project-specific REPL buffer."
+  (let ((existing (hara-connection-repl-buffer connection)))
+    (if (buffer-live-p existing)
+        existing
+      (let* ((project (file-name-nondirectory
+                       (directory-file-name (hara-connection-root connection))))
+             (buffer (get-buffer-create
+                      (generate-new-buffer-name
+                       (format "*Hara REPL %s*" project)))))
+        (setf (hara-connection-repl-buffer connection) buffer)
+        buffer))))
 
 ;;;###autoload
 (defun hara-repl ()
@@ -1220,11 +1351,12 @@ so a partial name is never evaluated."
   (interactive)
   (let* ((connection (hara--connection))
          (process (hara-connection-process connection))
-         (buffer (get-buffer-create "*Hara REPL*")))
+         (buffer (hara--repl-buffer connection)))
     (set-process-buffer process buffer)
     (with-current-buffer buffer
       (unless (derived-mode-p 'hara-repl-mode)
         (hara-repl-mode)
+        (setq-local default-directory (hara-connection-root connection))
         (setq-local hara--repl-connection connection)
         (let ((inhibit-read-only t))
           (erase-buffer)
@@ -1280,6 +1412,7 @@ so a partial name is never evaluated."
     (define-key map (kbd "C-c C-p") #'hara-doc-popup)
     (define-key map (kbd "C-c C-t") #'hara-test-file)
     (define-key map (kbd "C-c C-a") #'hara-test-project)
+    (define-key map (kbd "C-c C-o") #'hara-toggle-source-test)
     (define-key map (kbd "M-.") #'xref-find-definitions)
     map))
 
@@ -1293,6 +1426,7 @@ so a partial name is never evaluated."
     ["Test file" hara-test-file t]
     ["Test project" hara-test-project t]
     ["Rerun tests" hara-test-rerun t]
+    ["Toggle source/test" hara-toggle-source-test t]
     "---"
     ["Jack in" hara-jack-in t]
     ["Interrupt evaluation" hara-interrupt t]
@@ -1326,10 +1460,7 @@ so a partial name is never evaluated."
                   (lambda () (hara-connected-mode -1)) nil t))
     (when hara--connection
       (setf (hara-connection-refs hara--connection)
-            (max 0 (1- (hara-connection-refs hara--connection))))
-      (when (and (= 0 (hara-connection-refs hara--connection))
-                 (hara-connection-server-process hara--connection))
-        (hara--disconnect hara--connection)))))
+            (max 0 (1- (hara-connection-refs hara--connection)))))))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.hal\\'" . hara-mode))

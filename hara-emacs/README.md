@@ -10,15 +10,15 @@ Install from GitHub with `package-vc` (Emacs 29.1+):
 
 ```elisp
 (package-vc-install
- '(hara-mode :url "https://github.com/hoebat/hara.lang"
-             :lisp-dir "apps/hara-emacs"))
+ '(hara-mode :url "https://github.com/hara-lang/hara-extensions"
+             :lisp-dir "hara-emacs"))
 (require 'hara-mode)
 ```
 
 Or use a plain checkout:
 
 ```elisp
-(add-to-list 'load-path "/path/to/hara.lang/apps/hara-emacs")
+(add-to-list 'load-path "/path/to/hara-extensions/hara-emacs")
 (require 'hara-mode)
 ```
 
@@ -55,6 +55,12 @@ Open a `.hal` file and run `M-x hara-jack-in` or press `C-c C-j`. The client fir
 validated project endpoint, then checks `hara-host`/`hara-port`, and finally starts
 `hara --port 0 headless`. Emacs-owned servers stop on `M-x hara-disconnect`.
 
+The project server remains alive when source buffers are closed, so definitions
+and exploratory state survive ordinary navigation. Evaluation automatically
+synchronises the complete `ns`/`ns+` form when moving between namespaces.
+Every project has its own REPL buffer, preventing a multi-project workspace from
+sending input to the wrong runtime.
+
 By default, opening a local `.hal` file beneath a directory containing `project.edn` schedules
 `hara-jack-in` automatically. Standalone and remote files remain disconnected. Customize
 `hara-auto-jack-in-projects` to disable this behavior.
@@ -78,9 +84,29 @@ Common commands:
 - `C-c C-p`: show documentation near point with `eldoc-box`
 - `C-c C-t`: test the current file with the native Hara project runner
 - `C-c C-a`: test the whole Hara project
+- `C-c C-o`: toggle between conventional source and test files
 - `C-c m`: open the `code.manage` prefix (`s`/`i`/`p`/`n`/`d`/`m`)
 - `M-.`: jump to a source-backed definition with Xref
 - `M-,`: return through Xref history
+
+## Daily REPL-driven loop
+
+The intended inner loop is deliberately close to Foundation Base and CIDER:
+
+1. Open a `.hal` file. Project files jack in automatically; `C-c C-j` does it
+   explicitly.
+2. Run `C-c C-k` once to load the buffer and its namespace.
+3. Edit a definition and use `C-c C-c`, or evaluate a smaller expression with
+   `C-c C-e`.
+4. Use `C-c C-o` to move between source and its `_test.hal` counterpart.
+5. Run `C-c C-t` for the focused test in a fresh native process. From a source
+   buffer this automatically targets the existing conventional test file.
+6. Keep exploratory expressions in the project REPL with `C-c C-z`. The live
+   REPL is feedback; the fresh focused test remains the saved-code authority.
+
+Use `C-c m s` to scaffold a missing test before toggling to it. Run
+`M-x hara-disconnect` only when you intentionally want to stop the project
+server and discard its live state.
 
 Evaluation results use Hara-owned boxed, syntax-highlighted overlays at the end of the line, with
 fringe feedback and adaptive wrapping for long values. They clear after the next command. The
@@ -116,7 +142,7 @@ unmodified visiting buffers and open a newly created scaffold test.
 Run tests with:
 
 ```sh
-cd apps/hara-emacs
+cd /path/to/hara-extensions/hara-emacs
 make test        # run install checks plus the hara-mode and hara-manage ERT suites
 make compile     # byte-compile hara-mode.el and hara-manage.el
 make upgrade     # update the package-vc checkout in ~/.emacs.d/elpa
@@ -125,25 +151,27 @@ make upgrade     # update the package-vc checkout in ~/.emacs.d/elpa
 Build and install a Hara runtime (defaults to the Truffle jar):
 
 ```sh
-cd apps/hara-emacs
+cd /path/to/hara-extensions/hara-emacs
 make bin-build            # compile the Truffle runtime jar
 make bin-install          # install Truffle launcher + jar to ~/.local
 make bin-build-native     # build GraalVM native image
 make bin-install-native   # install native binary as ~/.local/bin/hara-native
 make bin-build-rust       # build Rust release binary
 make bin-install-rust     # install Rust binary as ~/.local/bin/hara-rust
+make bin-build-rust-lite  # build the small Rust interpreter
+make bin-install-rust-lite # install it as ~/.local/bin/hara-rust-lite
 make bin-clean            # remove installed binaries and jar
 ```
 
-The Emacs package ships with `apps/hara-emacs/bin/hara`, which `hara-mode`
+The Emacs package ships with `hara-emacs/bin/hara`, which `hara-mode`
 auto-detects and uses as `hara-command`. It runs the Truffle jar by default;
-set `HARA_BACKEND=rust` (or `native`) to switch backends, or customize
-`hara-command` directly.
+set `HARA_BACKEND=rust`, `rust-lite`, or `native` to switch backends, or
+customize `hara-command` directly.
 
 Or directly:
 
 ```sh
-emacs -Q --batch -L apps/hara-emacs -L apps/hara-emacs/test \
+emacs -Q --batch -L . -L test \
   -l hara-mode-test.el \
   -l hara-manage-test.el -f ert-run-tests-batch-and-exit
 ```
@@ -157,7 +185,7 @@ launcher prefers freshly-built artifacts in the repo root, then falls back to
 `~/.local`. To fix:
 
 ```sh
-cd apps/hara-emacs
+cd /path/to/hara-extensions/hara-emacs
 make bin-build-truffle   # or make bin-build for the default backend
 make bin-install-truffle # update the fallback jar in ~/.local
 make upgrade             # update the package-vc checkout in ~/.emacs.d/elpa
@@ -168,7 +196,7 @@ Then restart Emacs (or run `M-x package-vc-upgrade RET hara-mode RET`).
 To see exactly which binary/jar the launcher picked, run it with diagnostics:
 
 ```sh
-HARA_DIAGNOSTICS=1 ~/.emacs.d/elpa/hara-mode/apps/hara-emacs/bin/hara eval '(+ 1 2)'
+HARA_DIAGNOSTICS=1 ~/.emacs.d/elpa/hara-mode/hara-emacs/bin/hara eval '(+ 1 2)'
 ```
 
 In Emacs, `M-x hara-jack-in` logs the resolved command to the message area.
