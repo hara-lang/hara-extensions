@@ -85,7 +85,8 @@ jobs:
         run: |
           ! git grep -n 'Value::Decimal' -- hara-runtime/modules/db-postgres
           cargo fmt --manifest-path hara-runtime/Cargo.toml --package hara-db-postgres
-          cargo update --manifest-path hara-runtime/Cargo.toml -p hara-abi
+          cargo update --manifest-path hara-runtime/Cargo.toml \
+            -p 'git+https://github.com/hara-lang/hara.git?rev=af4e2856ae2580db9c1337044e6e1dc52bc8c30e#hara-abi@0.1.6'
           git diff --check
 
       - name: Check PostgreSQL provider formatting
