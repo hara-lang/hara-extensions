@@ -10,7 +10,7 @@ description = "Optional PostgreSQL native ABI module for Hara and Hestia"
 crate-type = ["rlib"]
 
 [dependencies]
-hara-abi = { git = "https://github.com/hara-lang/hara.git", rev = "af4e2856ae2580db9c1337044e6e1dc52bc8c30e", package = "hara-abi" }
+hara-abi = { git = "https://github.com/hara-lang/hara.git", rev = "0e91f6eccf11b1a5c4d48b0d43027b85eeb1298a", package = "hara-abi" }
 bytes = "1"
 chrono = "0.4"
 futures-util = "0.3"
