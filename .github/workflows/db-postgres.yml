@@ -17,6 +17,7 @@ on:
       - "hara-runtime/Cargo.toml"
       - "hara-runtime/Cargo.lock"
       - "hara-runtime/modules/db-postgres/**"
+      - ".github/agent-9-bootstrap.py"
       - ".github/workflows/db-postgres.yml"
   workflow_dispatch:
 
@@ -39,7 +40,7 @@ jobs:
           fetch-depth: 0
 
       - name: Assemble the Decimal-free provider branch
-        if: github.ref == 'refs/heads/agent/9-decimal-free-postgres-bootstrap'
+        if: github.ref == 'refs/heads/agent/9-decimal-free-postgres-bootstrap' || github.head_ref == 'agent/9-decimal-free-postgres-bootstrap'
         run: python3 .github/agent-9-bootstrap.py
 
       - name: Read the PostgreSQL provider's pinned Hara ABI revision
@@ -80,7 +81,7 @@ jobs:
           components: rustfmt
 
       - name: Refresh the Decimal-free ABI lock on the assembly branch
-        if: github.ref == 'refs/heads/agent/9-decimal-free-postgres-bootstrap'
+        if: github.ref == 'refs/heads/agent/9-decimal-free-postgres-bootstrap' || github.head_ref == 'agent/9-decimal-free-postgres-bootstrap'
         run: |
           ! git grep -n 'Value::Decimal' -- hara-runtime/modules/db-postgres
           cargo fmt --manifest-path hara-runtime/Cargo.toml --package hara-db-postgres
@@ -97,7 +98,7 @@ jobs:
         run: cargo check --locked --manifest-path hara-runtime/Cargo.toml --workspace
 
       - name: Commit the verified provider update
-        if: github.ref == 'refs/heads/agent/9-decimal-free-postgres-bootstrap'
+        if: github.ref == 'refs/heads/agent/9-decimal-free-postgres-bootstrap' || github.head_ref == 'agent/9-decimal-free-postgres-bootstrap'
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
