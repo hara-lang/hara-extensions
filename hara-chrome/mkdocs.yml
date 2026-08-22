@@ -1,0 +1,11 @@
+site_name: hara-chrome
+nav:
+  - Overview: index.md
+  - Toolbar control: control-popup.md
+  - Shared offscreen runtime: offscreen-runtime.md
+  - Browser control examples: browser-control-examples.md
+  - ChatGPT REPL map: chatgpt-webapp-repl.md
+  - ChatGPT login: chatgpt-login.md
+  - Tripo Studio REPL: tripo-webapp-repl.md
+  - Tripo Studio login: tripo-login.md
+  - Tripo asset downloads: tripo-download.md

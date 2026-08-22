@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "116",
+  "name": "hara",
+  "version": "0.1.0",
+  "description": "Long-lived Hara browser runtime with toolbar connection control and DevTools REPL",
+  "action": {
+    "default_title": "Hara connection control",
+    "default_popup": "src/popup.html"
+  },
+  "devtools_page": "src/devtools.html",
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "debugger",
+    "downloads",
+    "offscreen",
+    "storage",
+    "tabs"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

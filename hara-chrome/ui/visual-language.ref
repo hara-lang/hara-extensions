@@ -1,0 +1,4 @@
+repository=https://github.com/hara-lang/visual-language.git
+commit=ee0d92dadd0786bf52a0d79e7feabbd5be9105cc
+contract=V2-RUNTIME.md
+laboratory=https://hara-lang.github.io/visual-language/v2/tool/hara-chrome/

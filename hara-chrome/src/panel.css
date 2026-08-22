@@ -1,0 +1,63 @@
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  font-family: var(--hara-mono);
+  font-size: 12px;
+  color: var(--hara-text);
+  background: var(--hara-bg);
+}
+
+#toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  align-items: center;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--hara-line);
+  color: var(--hara-faint);
+  flex: none;
+}
+
+#toolbar button,
+#toolbar select,
+#toolbar input {
+  min-height: 24px;
+  box-sizing: border-box;
+  font: inherit;
+  color: var(--hara-muted);
+  background: transparent;
+  border: 1px solid var(--hara-line);
+  padding: 2px 8px;
+}
+
+#toolbar button { cursor: pointer; }
+#toolbar button:hover,
+#toolbar select:hover,
+#toolbar input:focus {
+  color: var(--hara-cyan);
+  border-color: var(--hara-cyan);
+  outline: none;
+}
+
+.toolbar-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbar-spacer { flex: 1; }
+#kernel-target { min-width: 230px; }
+#resp-url { width: 210px; }
+#kernel-status,
+#resp-status,
+#home-label { white-space: nowrap; }
+#resp-status[data-state="connected"] { color: var(--hara-cyan); }
+#resp-status[data-state="error"] { color: var(--hara-pink, #ff2e88); }
+
+#hara-studio-mount {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
