@@ -1,0 +1,21 @@
+{
+  "name": "chrome-hara",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "make build",
+    "sync": "make sync",
+    "dev": "make dev",
+    "test": "make test",
+    "test:fast": "make test-fast",
+    "test:sync": "make test-sync",
+    "test:browser": "make test-browser"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.1"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

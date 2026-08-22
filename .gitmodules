@@ -1,0 +1,6 @@
+[submodule "hara-chrome/ui/hara-ui"]
+	path = hara-chrome/ui/hara-ui
+	url = https://github.com/hara-lang/hara-ui.git
+[submodule "hara-chrome/ui/visual-language"]
+	path = hara-chrome/ui/visual-language
+	url = https://github.com/hara-lang/visual-language.git

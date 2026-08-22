@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hara connection control</title>
+<link rel="stylesheet" href="../vendor/visual-language/v2-tool.css">
+<link rel="stylesheet" href="./popup.css">
+<body class="hara-v2 hara-v2-tool" data-busy="false">
+  <main class="hara-runtime-compact hara-tool-surface panel" aria-labelledby="title" data-width="compact" data-state="off">
+    <header class="hara-runtime-compact-header">
+      <div class="hara-runtime-compact-identity">
+        <div class="hara-runtime-compact-eyebrow">Connection control</div>
+        <h2 id="title">Hara</h2>
+      </div>
+      <div id="global-status" class="hara-runtime-status global" data-state="off">
+        <span id="global-lamp" class="hara-runtime-status-lamp lamp" data-state="off" aria-hidden="true"></span>
+        <span id="global-label" class="hara-runtime-status-label">Offline</span>
+      </div>
+    </header>
+
+    <section class="hara-runtime-compact-target" aria-label="Browser target">
+      <strong id="target-label">No target</strong>
+      <span id="target-title">Scanning active tab…</span>
+    </section>
+
+    <section class="hara-runtime-compact-section" aria-labelledby="connections-title">
+      <h3 id="connections-title">Connections</h3>
+      <div class="hara-runtime-connection-list">
+        <label id="binding-row" class="hara-runtime-connection control-row" for="binding-toggle" data-state="off" data-desired="off">
+          <span id="binding-lamp" class="hara-runtime-status-lamp lamp" data-state="off" aria-hidden="true"></span>
+          <span class="hara-runtime-connection-copy copy"><span class="hara-runtime-connection-label">Current tab</span><small id="binding-detail"></small></span>
+          <output id="binding-state" class="hara-runtime-connection-state">Off</output>
+          <span class="hara-runtime-switch">
+            <input id="binding-toggle" class="hara-runtime-switch-input" type="checkbox" role="switch" aria-label="Bind current tab">
+            <span class="hara-runtime-switch-track" aria-hidden="true"><span class="hara-runtime-switch-thumb"></span></span>
+          </span>
+        </label>
+
+        <label id="runtime-row" class="hara-runtime-connection control-row" for="runtime-toggle" data-state="off" data-desired="off">
+          <span id="runtime-lamp" class="hara-runtime-status-lamp lamp" data-state="off" aria-hidden="true"></span>
+          <span class="hara-runtime-connection-copy copy"><span class="hara-runtime-connection-label">Hara runtime</span><small id="runtime-detail"></small></span>
+          <output id="runtime-state" class="hara-runtime-connection-state">Off</output>
+          <span class="hara-runtime-switch">
+            <input id="runtime-toggle" class="hara-runtime-switch-input" type="checkbox" role="switch" aria-label="Run Hara runtime">
+            <span class="hara-runtime-switch-track" aria-hidden="true"><span class="hara-runtime-switch-thumb"></span></span>
+          </span>
+        </label>
+
+        <label id="resp-row" class="hara-runtime-connection control-row" for="resp-toggle" data-state="off" data-desired="off">
+          <span id="resp-lamp" class="hara-runtime-status-lamp lamp" data-state="off" aria-hidden="true"></span>
+          <span class="hara-runtime-connection-copy copy"><span class="hara-runtime-connection-label">RESP</span><small id="resp-detail"></small></span>
+          <output id="resp-state" class="hara-runtime-connection-state">Off</output>
+          <span class="hara-runtime-switch">
+            <input id="resp-toggle" class="hara-runtime-switch-input" type="checkbox" role="switch" aria-label="Connect RESP">
+            <span class="hara-runtime-switch-track" aria-hidden="true"><span class="hara-runtime-switch-thumb"></span></span>
+          </span>
+        </label>
+
+        <label id="adapter-row" class="hara-runtime-connection control-row" for="adapter-toggle" data-state="off" data-desired="off">
+          <span id="adapter-lamp" class="hara-runtime-status-lamp lamp" data-state="off" aria-hidden="true"></span>
+          <span class="hara-runtime-connection-copy copy"><span id="adapter-label" class="hara-runtime-connection-label">Context adapter</span><small id="adapter-detail">Bound tab only</small></span>
+          <output id="adapter-state" class="hara-runtime-connection-state">None</output>
+          <span class="hara-runtime-switch">
+            <input id="adapter-toggle" class="hara-runtime-switch-input" type="checkbox" role="switch" aria-label="Enable contextual site adapter">
+            <span class="hara-runtime-switch-track" aria-hidden="true"><span class="hara-runtime-switch-thumb"></span></span>
+          </span>
+        </label>
+      </div>
+    </section>
+
+    <section class="hara-runtime-compact-section" aria-labelledby="status-title">
+      <h3 id="status-title">Status</h3>
+      <div class="hara-runtime-status-list">
+        <div id="dom-row" class="hara-runtime-status-row status-row" data-state="off">
+          <span id="dom-lamp" class="hara-runtime-status-lamp lamp" data-state="off" aria-hidden="true"></span>
+          <span>DOM service</span>
+          <output id="dom-state">Off</output>
+        </div>
+        <div id="downloads-row" class="hara-runtime-status-row status-row" data-state="ready">
+          <span id="downloads-lamp" class="hara-runtime-status-lamp lamp" data-state="off" aria-hidden="true"></span>
+          <span>Downloads</span>
+          <output id="downloads-state">Idle</output>
+        </div>
+      </div>
+    </section>
+
+    <section id="error-panel" class="hara-runtime-error error" hidden aria-live="assertive">
+      <span class="error-copy"><strong id="error-code">control/error</strong><span id="error-message"></span></span>
+      <button id="clear-error" class="hara-tool-button" data-density="dense" type="button">Clear</button>
+    </section>
+
+    <footer class="hara-runtime-actions">
+      <button id="open-repl" class="hara-tool-button" data-density="dense" type="button">Open REPL</button>
+      <button id="reconnect" class="hara-tool-button" data-density="dense" type="button">Reconnect</button>
+      <button id="disconnect-all" class="hara-tool-button" data-density="dense" type="button">Disconnect all</button>
+    </footer>
+  </main>
+  <script type="module" src="./popup.js"></script>
+</body>

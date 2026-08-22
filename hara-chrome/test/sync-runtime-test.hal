@@ -1,0 +1,30 @@
+;; Focused standalone validation for scripts/sync-runtime.hal.
+(ns hara-chrome.sync-runtime-test
+  (:config {}))
+
+(def expected-assets
+  ["/extensions/hara-chrome/vendor/hta.js"
+   "/extensions/hara-chrome/vendor/hta-worker.js"
+   "/extensions/hara-chrome/vendor/packages/hta/index.js"
+   "/extensions/hara-chrome/vendor/host/broker.js"
+   "/extensions/hara-chrome/vendor/host/services.js"
+   "/extensions/hara-chrome/vendor/studio/broker.js"
+   "/extensions/hara-chrome/vendor/studio/hal/boot.hal"
+   "/extensions/hara-chrome/vendor/studio/ui.js"
+   "/extensions/hara-chrome/vendor/hara.wasm"
+   "/extensions/hara-chrome/vendor/ui/tokens.css"
+   "/extensions/hara-chrome/vendor/visual-language/v2-tool.css"
+   "/extensions/hara-chrome/vendor/visual-language/v2/tool-runtime.css"])
+
+(def missing-assets
+  (vec
+   (filter
+    (fn [path]
+      (not (deref (File/exists? path))))
+    expected-assets)))
+
+(if (empty? missing-assets)
+  (println (str "hara-chrome sync validation passed: " (count expected-assets) " assets"))
+  (throw
+   (ex-info "hara-chrome sync validation failed"
+            {:missing missing-assets})))

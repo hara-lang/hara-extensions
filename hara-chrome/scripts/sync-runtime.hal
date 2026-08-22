@@ -1,0 +1,140 @@
+;; Standalone workspace-root asset staging. This file intentionally depends
+;; only on built-in File/* effects and deref so it can run before project
+;; namespaces or package resources have been loaded.
+(ns hara-chrome.sync-runtime
+  (:config {}))
+
+(def ^:private extension-root
+  "/extensions/hara-chrome")
+
+(def ^:private runtime-assets
+  [{:source "/technology/hara/core/rust/web/hta.js"
+    :target (str extension-root "/vendor/hta.js")}
+   {:source "/technology/hara/core/rust/web/hta-worker.js"
+    :target (str extension-root "/vendor/hta-worker.js")}
+   {:source "/technology/hara/core/rust/web/packages"
+    :target (str extension-root "/vendor/packages")}
+   {:source "/technology/hara/core/rust/web/host"
+    :target (str extension-root "/vendor/host")}
+   {:source "/technology/hara/core/rust/web/studio"
+    :target (str extension-root "/vendor/studio")}
+   {:source "/technology/hara/core/rust/raw/target/wasm32-unknown-unknown/browser-release/hara-wasm-vm.wasm"
+    :target (str extension-root "/vendor/hara.wasm")}
+   {:source (str extension-root "/ui/hara-ui/tokens.css")
+    :target (str extension-root "/vendor/ui/tokens.css")}
+   {:source (str extension-root "/ui/hara-ui/components.css")
+    :target (str extension-root "/vendor/ui/components.css")}
+   {:source (str extension-root "/ui/hara-ui/studio.css")
+    :target (str extension-root "/vendor/ui/studio.css")}
+   {:source (str extension-root "/ui/hara-ui/studio-shell.js")
+    :target (str extension-root "/vendor/ui/studio-shell.js")}
+   {:source (str extension-root "/ui/visual-language/src/tokens.css")
+    :target (str extension-root "/vendor/visual-language/tokens.css")}
+   {:source (str extension-root "/ui/visual-language/src/theme.css")
+    :target (str extension-root "/vendor/visual-language/theme.css")}
+   {:source (str extension-root "/ui/visual-language/src/v2.css")
+    :target (str extension-root "/vendor/visual-language/v2.css")}
+   {:source (str extension-root "/ui/visual-language/src/v2-tool.css")
+    :target (str extension-root "/vendor/visual-language/v2-tool.css")}
+   {:source (str extension-root "/ui/visual-language/src/v2")
+    :target (str extension-root "/vendor/visual-language/v2")}])
+
+(defn- wait!
+  [pending]
+  (deref pending))
+
+(defn- child-path
+  [directory name]
+  (if (= directory "/")
+    (str "/" name)
+    (str directory "/" name)))
+
+(defn- delete-node!
+  [path]
+  (letfn [(delete-many! [children]
+            (loop [index 0]
+              (if (< index (count children))
+                (do
+                  (delete-one! (:path (nth children index)))
+                  (recur (inc index)))
+                true)))
+          (delete-one! [current]
+            (if (wait! (File/exists? current))
+              (let [entry (wait! (File/stat current))]
+                (if (= (:type entry) :directory)
+                  (delete-many! (wait! (File/entries current)))
+                  true)
+                (wait! (File/delete current {:missing-ok? true})))
+              true))]
+    (delete-one! path)))
+
+(defn- copy-node!
+  [source target]
+  (letfn [(copy-many! [children destination]
+            (loop [index 0]
+              (if (< index (count children))
+                (let [entry (nth children index)]
+                  (copy-one! (:path entry)
+                             (child-path destination (:name entry)))
+                  (recur (inc index)))
+                destination)))
+          (copy-one! [current destination]
+            (let [entry (wait! (File/stat current))]
+              (cond
+                (= (:type entry) :directory)
+                (do
+                  (delete-node! destination)
+                  (wait! (File/mkdir destination
+                                     {:parents? true
+                                      :exists-ok? true}))
+                  (copy-many! (wait! (File/entries current)) destination))
+
+                (= (:type entry) :file)
+                (do
+                  (delete-node! destination)
+                  (wait! (File/copy current destination
+                                    {:replace? true
+                                     :parents? true}))
+                  destination)
+
+                :else
+                (throw
+                 (ex :greenways.ex/unsupported-runtime-asset {:source current
+                           :target destination
+                           :type (:type entry)} :ex/message "Unsupported hara-chrome runtime asset type" :ex/class :greenways.class/runtime-asset)))))]
+    (copy-one! source target)))
+
+(defn- sync-asset!
+  [{:keys [source target]}]
+  (if (wait! (File/exists? source))
+    (do
+      (copy-node! source target)
+      (println (str "synced " target))
+      target)
+    (throw
+     (ex :not-found {:source source
+               :target target} :ex/message "Required hara-chrome runtime asset is missing"))))
+
+(defn- ensure-runtime-assets!
+  []
+  (loop [index 0]
+    (if (< index (count runtime-assets))
+      (let [{:keys [source target]} (nth runtime-assets index)]
+        (if (wait! (File/exists? source))
+          (recur (inc index))
+          (throw
+           (ex :not-found {:source source
+                     :target target} :ex/message "Required hara-chrome runtime asset is missing"))))
+      true)))
+
+(defn- sync-runtime!
+  []
+  (ensure-runtime-assets!)
+  (delete-node! (str extension-root "/vendor"))
+  (wait! (File/mkdir (str extension-root "/vendor")
+                     {:parents? true
+                      :exists-ok? true}))
+  (vec (map sync-asset! runtime-assets)))
+
+(let [synced-assets (sync-runtime!)]
+  (println (str "hara-chrome runtime assets synced: " (count synced-assets))))

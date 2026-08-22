@@ -1,0 +1,55 @@
+;; Closed, panel-bound DOM access for the headless hara-chrome runtime.
+;; Values are serializable snapshots containing opaque backend node references.
+(ns browser.dom)
+
+(defn- call
+  ([method]
+   (deref (host/call "hara.dom" method)))
+  ([method a]
+   (deref (host/call "hara.dom" method a)))
+  ([method a b]
+   (deref (host/call "hara.dom" method a b))))
+
+(defn target
+  "Returns the panel-bound top-level Chrome target as {:tab-id ... :url ...}."
+  []
+  (call "target"))
+
+(defn query
+  "Returns the first top-level document match for selector, or nil."
+  [selector]
+  (call "query" selector))
+
+(defn query-all
+  "Returns all top-level document matches up to limit. The default is 100 and
+   the maximum accepted limit is 1000. Matching more than limit is an error."
+  ([selector]
+   (call "query-all" selector))
+  ([selector limit]
+   (call "query-all" selector limit)))
+
+(defn refresh
+  "Resolves an opaque backend node reference into a fresh serializable snapshot."
+  [element]
+  (call "refresh" element))
+
+(defn focus
+  "Focuses element and returns true."
+  [element]
+  (call "focus" element))
+
+(defn fill
+  "Fills an input, textarea, select, or content-editable element and emits
+   bubbling input and change events."
+  [element value]
+  (call "fill" element value))
+
+(defn click
+  "Clicks element through CDP input dispatch and returns true."
+  [element]
+  (call "click" element))
+
+(defn detach
+  "Releases this panel's DOM debugger lease. Future operations attach again."
+  []
+  (call "detach"))

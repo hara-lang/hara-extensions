@@ -1,0 +1,77 @@
+;; Panel-bound Tripo Studio inventory, login, and explicit asset downloads for hara-chrome.
+(ns browser.site.tripo)
+
+(defn- call
+  ([method]
+   (deref (host/call "hara.tripo" method)))
+  ([method a]
+   (deref (host/call "hara.tripo" method a))))
+
+(defn- with-kind
+  [kind values]
+  (vec
+   (map
+    (fn [value]
+      (assoc value :kind kind))
+    values)))
+
+(defn login-status
+  "Returns :signed-in, :signed-out, or the current browser-controlled auth state."
+  []
+  (call "login-status"))
+
+(defn login-start
+  "Activates the visible Tripo login control. Credentials remain in the browser."
+  []
+  (call "login-start"))
+
+(defn login-wait
+  "Waits for browser login to return to an authenticated Tripo Studio inventory."
+  ([]
+   (call "login-wait"))
+  ([timeout-ms]
+   (call "login-wait" timeout-ms)))
+
+(defn login
+  "Starts the visible Tripo login flow and waits for user-controlled completion."
+  ([]
+   (call "login"))
+  ([timeout-ms]
+   (call "login" timeout-ms)))
+
+(defn status
+  "Returns the verified panel-bound Tripo Studio target and selector profile."
+  []
+  (call "status"))
+
+(defn workspace
+  "Returns the current visible personal or team workspace snapshot."
+  []
+  (assoc (call "workspace") :kind :workspace))
+
+(defn open-assets
+  "Opens the visible Tripo Assets library."
+  []
+  (call "open-assets"))
+
+(defn assets
+  "Lists visible assets in the open Tripo Assets library."
+  []
+  (with-kind :asset (call "assets")))
+
+(defn open-asset
+  "Re-resolves an asset by logical identity and opens its current visible link."
+  [asset]
+  (call "open-asset" asset))
+
+(defn export-options
+  "Opens the visible export surface for an open asset and lists available formats."
+  [asset]
+  (with-kind :export-option (call "export-options" asset)))
+
+(defn download-asset
+  "Downloads an open asset through visible export UI; requires :confirm-download? true."
+  [asset options]
+  (assoc
+   (call "download-asset" (assoc options :asset asset))
+   :kind :asset-download))

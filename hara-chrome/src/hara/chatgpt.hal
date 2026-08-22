@@ -1,0 +1,80 @@
+;; Panel-bound ChatGPT web inventory and browser-controlled login for hara-chrome.
+(ns browser.site.chatgpt)
+
+(defn- call
+  ([method]
+   (deref (host/call "hara.chatgpt" method)))
+  ([method a]
+   (deref (host/call "hara.chatgpt" method a))))
+
+(defn- with-kind
+  [kind values]
+  (vec
+   (map
+    (fn [value]
+      (assoc value :kind kind))
+    values)))
+
+(defn status
+  "Returns the verified panel-bound ChatGPT target and selector-profile state."
+  []
+  (call "status"))
+
+(defn login-status
+  "Returns :signed-in, :signed-out, or the current browser-controlled auth state."
+  []
+  (call "login-status"))
+
+(defn login-start
+  "Activates the visible login control. Credentials remain in the browser."
+  []
+  (call "login-start"))
+
+(defn login-wait
+  "Waits for the browser login to return to an authenticated ChatGPT inventory."
+  ([]
+   (call "login-wait"))
+  ([timeout-ms]
+   (call "login-wait" timeout-ms)))
+
+(defn login
+  "Starts the visible login flow and waits for user-controlled completion."
+  ([]
+   (call "login"))
+  ([timeout-ms]
+   (call "login" timeout-ms)))
+
+(defn chats
+  "Lists the visible ChatGPT chat inventory as bounded logical snapshots."
+  []
+  (with-kind :chat (call "chats")))
+
+(defn pinned
+  "Lists visible chats currently classified as pinned."
+  []
+  (with-kind :chat (call "pinned")))
+
+(defn projects
+  "Lists the visible ChatGPT project inventory as bounded logical snapshots."
+  []
+  (with-kind :project (call "projects")))
+
+(defn search-chats
+  "Opens the visible ChatGPT search UI, fills query, and returns settled results."
+  [query]
+  (with-kind :chat-search-result (call "search-chats" query)))
+
+(defn project-chats
+  "Lists chats visible inside project. The project must already be open."
+  [project]
+  (with-kind :chat (call "project-chats" project)))
+
+(defn open-chat
+  "Re-resolves chat by logical identity and opens its current visible link."
+  [chat]
+  (call "open-chat" chat))
+
+(defn open-project
+  "Re-resolves project by logical identity and opens its current visible link."
+  [project]
+  (call "open-project" project))
