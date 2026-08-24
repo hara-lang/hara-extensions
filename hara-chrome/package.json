@@ -10,7 +10,8 @@
     "test": "make test",
     "test:fast": "make test-fast",
     "test:sync": "make test-sync",
-    "test:browser": "make test-browser"
+    "test:browser": "make test-browser",
+    "test:remote-browser": "make test-remote-browser"
   },
   "devDependencies": {
     "@playwright/test": "^1.54.1"

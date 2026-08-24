@@ -30,18 +30,19 @@ SYNC_FILE = $(EXTENSION_DIR)/scripts/sync-runtime.hal
 SYNC_TEST = $(EXTENSION_DIR)/test/sync-runtime-test.hal
 
 .NOTPARALLEL:
-.PHONY: help check-workspace dependencies browser build sync dev chatgpt-login tripo-login test test-fast test-sync test-browser
+.PHONY: help check-workspace dependencies browser build sync dev chatgpt-login tripo-login test test-fast test-sync test-browser test-remote-browser
 
 help:
 	@printf '%s\n' \
-	  'make build          build Hara WASM and stage extension assets' \
-	  'make dev            install dependencies, build, and run Chromium' \
-	  'make chatgpt-login  run headed Chromium with a persistent ChatGPT profile' \
-	  'make tripo-login    run headed Chromium with a persistent Tripo Studio profile' \
-	  'make test           clean-capable Node suite; builds and stages vendor assets first' \
-	  'make test-fast      focused Node tests that do not import staged runtime assets' \
-	  'make test-sync      validate native asset sync in fresh Hara processes' \
-	  'make test-browser   build and run the full Playwright extension suite' \
+	  'make build                build Hara WASM and stage extension assets' \
+	  'make dev                  install dependencies, build, and run Chromium' \
+	  'make chatgpt-login        run headed Chromium with a persistent ChatGPT profile' \
+	  'make tripo-login          run headed Chromium with a persistent Tripo Studio profile' \
+	  'make test                 clean-capable Node suite; builds and stages vendor assets first' \
+	  'make test-fast            focused Node tests that do not import staged runtime assets' \
+	  'make test-sync            validate native asset sync in fresh Hara processes' \
+	  'make test-browser         build and run the full Playwright extension suite' \
+	  'make test-remote-browser  build and run the real loopback pure-Wasm proof' \
 	  '' \
 	  'Variables: RESP_PORT=7355 WS_PORT=7356 PROFILE_DIR= URL=about:blank HEADLESS=true' \
 	  '           CHATGPT_PROFILE_DIR=$$HOME/.greenways/hara-chrome/chatgpt-profile' \
@@ -123,6 +124,11 @@ test-fast: dependencies
 	  test/offscreen-configuration.test.js \
 	  test/popup-v2.test.js \
 	  test/profile-cleanup.test.js \
+	  test/remote-host-boundary.test.js \
+	  test/remote-host-client.test.js \
+	  test/remote-host-protocol.test.js \
+	  test/remote-language-host-core.test.js \
+	  test/remote-sandbox-executor.test.js \
 	  test/resp-bridge.test.js \
 	  test/resp-client.test.js \
 	  test/resp-protocol.test.js \
@@ -145,3 +151,9 @@ test-browser:
 	$(MAKE) browser
 	$(MAKE) build
 	npx playwright test
+
+test-remote-browser:
+	$(MAKE) dependencies
+	$(MAKE) browser
+	$(MAKE) build
+	npx playwright test test/remote-language-host.spec.js
