@@ -88,12 +88,42 @@ async function readJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+function corsHeaders(request) {
+  return {
+    "access-control-allow-origin": request.headers.origin ?? "*",
+    "access-control-allow-private-network": "true",
+    vary: "Origin, Access-Control-Request-Headers, Access-Control-Request-Private-Network",
+  };
+}
+
+function jsonHeaders(request) {
+  return {
+    ...corsHeaders(request),
+    "content-type": "application/json",
+  };
+}
+
 export async function startFakeRelay({ token = TEST_TOKEN, onRegister, onPoll, onResult } = {}) {
   const requests = [];
   const server = createServer(async (request, response) => {
+    const method = request.method ?? "GET";
+    const path = request.url ?? "/";
     try {
+      if (method === "OPTIONS") {
+        requests.push({ method, path, body: null });
+        response.writeHead(204, {
+          ...corsHeaders(request),
+          "access-control-allow-methods": "POST, OPTIONS",
+          "access-control-allow-headers": "authorization, content-type",
+          "access-control-max-age": "0",
+        });
+        response.end();
+        return;
+      }
+
       if (request.headers.authorization !== `Bearer ${token}`) {
-        response.writeHead(401, { "content-type": "application/json" });
+        requests.push({ method, path, body: null });
+        response.writeHead(401, jsonHeaders(request));
         response.end(JSON.stringify({
           protocol: LOOPBACK_RELAY_PROTOCOL,
           accepted: false,
@@ -102,9 +132,9 @@ export async function startFakeRelay({ token = TEST_TOKEN, onRegister, onPoll, o
         return;
       }
       const body = await readJson(request);
-      requests.push({ path: request.url, body, headers: { ...request.headers } });
+      requests.push({ method, path, body });
       let value;
-      if (request.url === "/v0/host/register") {
+      if (path === "/v0/host/register") {
         value = (await onRegister?.(body, { request, response, requests })) ?? {
           protocol: LOOPBACK_RELAY_PROTOCOL,
           accepted: true,
@@ -113,20 +143,20 @@ export async function startFakeRelay({ token = TEST_TOKEN, onRegister, onPoll, o
           heartbeatTtlMs: 5_000,
           pollAfterMs: 1,
         };
-      } else if (request.url === "/v0/host/poll") {
+      } else if (path === "/v0/host/poll") {
         value = (await onPoll?.(body, { request, response, requests })) ?? {
           protocol: LOOPBACK_RELAY_PROTOCOL,
           kind: "idle",
           retryAfterMs: 1,
         };
-      } else if (request.url === "/v0/host/result") {
+      } else if (path === "/v0/host/result") {
         value = (await onResult?.(body, { request, response, requests })) ?? {
           protocol: LOOPBACK_RELAY_PROTOCOL,
           accepted: true,
           duplicate: false,
         };
       } else {
-        response.writeHead(404, { "content-type": "application/json" });
+        response.writeHead(404, jsonHeaders(request));
         response.end(JSON.stringify({
           protocol: LOOPBACK_RELAY_PROTOCOL,
           accepted: false,
@@ -135,11 +165,11 @@ export async function startFakeRelay({ token = TEST_TOKEN, onRegister, onPoll, o
         return;
       }
       if (response.writableEnded || response.destroyed) return;
-      response.writeHead(200, { "content-type": "application/json" });
+      response.writeHead(200, jsonHeaders(request));
       response.end(JSON.stringify(value));
     } catch (error) {
       if (response.writableEnded || response.destroyed) return;
-      response.writeHead(500, { "content-type": "application/json" });
+      response.writeHead(500, jsonHeaders(request));
       response.end(JSON.stringify({
         protocol: LOOPBACK_RELAY_PROTOCOL,
         accepted: false,
