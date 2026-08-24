@@ -51,7 +51,7 @@ jobs:
 
       - name: Run the closed remote-host unit lane
         working-directory: workspace/extensions/hara-chrome
-        run: npm ci && make test-fast
+        run: make test-remote-fast
 
       - name: Run the packaged Chromium relay to pure-Wasm proof
         working-directory: workspace/extensions/hara-chrome
