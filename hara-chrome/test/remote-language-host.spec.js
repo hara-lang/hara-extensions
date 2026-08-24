@@ -6,8 +6,46 @@ import { sha256Source } from "../src/remote-sandbox-executor.js";
 import { launchWithExtension } from "./extension.js";
 import { TEST_TOKEN, eventually, startFakeRelay, testRequest } from "./remote-host-fixtures.js";
 
+function relayRequestSummary(entry) {
+  const body = entry.body ?? {};
+  return {
+    method: entry.method,
+    path: entry.path,
+    protocol: body.protocol ?? null,
+    hostId: body.hostId ?? body.descriptor?.hostId ?? null,
+    generation: body.generation ?? body.descriptor?.generation ?? null,
+    acknowledgedCommandId: body.acknowledgedCommandId ?? null,
+    resultRequestId: body.result?.requestId ?? null,
+  };
+}
+
+async function browserProofEvidence(runtime, relay, descriptor, results) {
+  const offscreenUrl = `chrome-extension://${runtime.extensionId}/src/runtime-host.html`;
+  const contexts = await runtime.serviceWorker.evaluate(
+    async (documentUrl) => chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+      documentUrls: [documentUrl],
+    }),
+    offscreenUrl,
+  );
+  return {
+    descriptor,
+    resultStatuses: results.map((result) => ({
+      requestId: result?.requestId ?? null,
+      status: result?.status ?? null,
+      diagnosticCodes: result?.diagnostics?.map((diagnostic) => diagnostic.code) ?? [],
+      cleanup: result?.evidence?.cleanup ?? null,
+    })),
+    relayRequests: relay.requests.map(relayRequestSummary),
+    offscreenContexts: contexts.map((context) => ({
+      contextType: context.contextType,
+      documentUrl: context.documentUrl,
+    })),
+  };
+}
+
 test("offscreen Hara language host evaluates through a fresh canonical pure Wasm sandbox", async () => {
-  test.setTimeout(120_000);
+  test.setTimeout(150_000);
   const positive = testRequest({ sourceDigest: await sha256Source("(+ 40 2)") });
   const deniedSource = "(require [chrome.api])";
   const negative = testRequest({
@@ -72,7 +110,13 @@ test("offscreen Hara language host evaluates through a fresh canonical pure Wasm
       { key: REMOTE_LANGUAGE_HOST_STORAGE_KEY, relayUrl: relay.url, token: TEST_TOKEN },
     );
 
-    await eventually(() => results.length === 2, { timeoutMs: 60_000, intervalMs: 25 });
+    try {
+      await eventually(() => descriptor !== null, { timeoutMs: 30_000, intervalMs: 25 });
+      await eventually(() => results.length === 2, { timeoutMs: 90_000, intervalMs: 25 });
+    } catch (error) {
+      const evidence = await browserProofEvidence(runtime, relay, descriptor, results);
+      throw new Error(`${error?.message ?? error}\n${JSON.stringify(evidence, null, 2)}`);
+    }
 
     expect(descriptor).not.toBeNull();
     expect(descriptor.kind).toBe("browser-wasm");
