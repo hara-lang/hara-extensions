@@ -85,7 +85,7 @@ Common commands:
 - `C-c C-t`: test the current file with the native Hara project runner
 - `C-c C-a`: test the whole Hara project
 - `C-c C-o`: toggle between conventional source and test files
-- `C-c m`: open the `code.manage` prefix (`s`/`i`/`p`/`n`/`d`/`m`)
+- `C-c C-m`: open the `code.manage` prefix (`s`/`i`/`p`/`n`/`d`/`m`)
 - `M-.`: jump to a source-backed definition with Xref
 - `M-,`: return through Xref history
 
@@ -104,7 +104,7 @@ The intended inner loop is deliberately close to Foundation Base and CIDER:
 6. Keep exploratory expressions in the project REPL with `C-c C-z`. The live
    REPL is feedback; the fresh focused test remains the saved-code authority.
 
-Use `C-c m s` to scaffold a missing test before toggling to it. Run
+Use `C-c C-m s` to scaffold a missing test before toggling to it. Run
 `M-x hara-disconnect` only when you intentionally want to stop the project
 server and discard its live state.
 
@@ -116,14 +116,14 @@ ElDoc stays silent until the current buffer has explicitly connected to Hara.
 
 ## `code.manage` workflows
 
-Hara buffers expose project workflows beneath `C-c m`:
+Hara buffers expose project workflows beneath `C-c C-m`:
 
-- `C-c m s` previews `scaffold`; with a prefix argument it prompts for `--added VERSION`.
-- `C-c m i` previews `import`.
-- `C-c m p` previews `purge`.
-- `C-c m n` reports incomplete definitions and `TODO` facts.
-- `C-c m d` reports historical M/T/N/C pedantic findings.
-- `C-c m m` selects any workflow with completion.
+- `C-c C-m s` previews `scaffold`; with a prefix argument it prompts for `--added VERSION`.
+- `C-c C-m i` previews `import`.
+- `C-c C-m p` previews `purge`.
+- `C-c C-m n` reports incomplete definitions and `TODO` facts.
+- `C-c C-m d` reports historical M/T/N/C pedantic findings.
+- `C-c C-m m` selects any workflow with completion.
 
 The integration resolves the current `ns` or `ns+` declaration, normalizes a
 `foo-test` buffer back to `foo`, saves affected Hara buffers, and invokes:

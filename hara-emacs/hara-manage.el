@@ -1,9 +1,23 @@
-;;; hara-manage.el --- code.manage integration for Hara -*- lexical-binding: t; -*-
+;;; hara-manage.el --- Code.manage integration for Hara -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2026 Hara contributors
+;; Copyright 2026 The Hara Authors
+;; Author: Hoebat Kappa Mu <1455572+hoebat@users.noreply.github.com>
 ;; Package-Requires: ((emacs "29.1"))
+;; Version: 0.1.0
 ;; Keywords: languages, tools
 ;; URL: https://github.com/hara-lang/hara-extensions
+
+;; Licensed under the Apache License, Version 2.0 (the "License");
+;; you may not use this file except in compliance with the License.
+;; You may obtain a copy of the License at
+;;
+;;     http://www.apache.org/licenses/LICENSE-2.0
+;;
+;; Unless required by applicable law or agreed to in writing, software
+;; distributed under the License is distributed on an "AS IS" BASIS,
+;; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+;; See the License for the specific language governing permissions and
+;; limitations under the License.
 
 ;;; Commentary:
 
@@ -499,19 +513,22 @@ With a prefix argument, prompt for an explicit :added version."
     (define-key map (kbd "k") #'hara-manage-cancel)
     (define-key map (kbd "m") #'hara-manage-dispatch)
     map)
-  "Prefix keymap installed beneath `C-c m'.")
+  "Prefix keymap installed beneath `C-c C-m'.")
 
 ;;;###autoload
 (define-minor-mode hara-manage-mode
   "Minor mode for Hara code.manage workflows."
   :lighter " HaraM"
   :keymap (let ((map (make-sparse-keymap)))
-            (define-key map (kbd "C-c m") hara-manage-prefix-map)
+            (define-key map (kbd "C-c C-m") hara-manage-prefix-map)
             map))
 
-(with-eval-after-load 'hara-mode
+(defun hara-manage--install-hara-mode-bindings ()
+  "Install code.manage bindings in the current Hara major mode map."
   (when (boundp 'hara-mode-map)
-    (define-key hara-mode-map (kbd "C-c m") hara-manage-prefix-map)))
+    (define-key hara-mode-map (kbd "C-c C-m") hara-manage-prefix-map)))
+
+(add-hook 'hara-mode-hook #'hara-manage--install-hara-mode-bindings)
 
 (provide 'hara-manage)
 ;;; hara-manage.el ends here

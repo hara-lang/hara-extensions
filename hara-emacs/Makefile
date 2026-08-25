@@ -15,7 +15,7 @@ ELISP_COMPILED := $(ELISP_SOURCES:.el=.elc)
 
 all: compile test
 
-test: test-install
+test: compile test-install
 	$(EMACS) --batch -L . -L test \
 	  -l test/hara-mode-test.el \
 	  -l test/hara-manage-test.el \

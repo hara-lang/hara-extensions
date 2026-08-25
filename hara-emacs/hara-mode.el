@@ -1,7 +1,23 @@
 ;;; hara-mode.el --- Hara editing and RESP tooling -*- lexical-binding: t; -*-
 
+;; Copyright 2026 The Hara Authors
+;; Author: Hoebat Kappa Mu <1455572+hoebat@users.noreply.github.com>
+;; Keywords: languages, lisp, tools
+;; URL: https://github.com/hara-lang/hara-extensions
 ;; Package-Requires: ((emacs "29.1"))
 ;; Version: 0.1.0
+
+;; Licensed under the Apache License, Version 2.0 (the "License");
+;; you may not use this file except in compliance with the License.
+;; You may obtain a copy of the License at
+;;
+;;     http://www.apache.org/licenses/LICENSE-2.0
+;;
+;; Unless required by applicable law or agreed to in writing, software
+;; distributed under the License is distributed on an "AS IS" BASIS,
+;; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+;; See the License for the specific language governing permissions and
+;; limitations under the License.
 
 ;;; Commentary:
 ;; A dependency-free Hara major mode, protocol-4 client, project launcher, and REPL.
@@ -36,7 +52,8 @@
 If you customize this, hara-mode will use your value exactly. Otherwise it
 tries to find a package-local `bin/hara' launcher and falls back to a `hara'
 executable on `exec-path'."
-  :type 'string)
+  :type 'string
+  :group 'hara)
 
 (defun hara--package-bin ()
   "Return the path to the package-local bin/hara launcher, if any."
@@ -79,44 +96,53 @@ Prefer, in order:
 
 (defcustom hara-host "127.0.0.1"
   "Configured Hara RESP host."
-  :type 'string)
+  :type 'string
+  :group 'hara)
 
 (defcustom hara-port 1311
   "Configured Hara RESP port."
-  :type 'integer)
+  :type 'integer
+  :group 'hara)
 
 (defcustom hara-auto-start t
   "When non-nil, `hara-connect' launches a server if discovery fails."
-  :type 'boolean)
+  :type 'boolean
+  :group 'hara)
 
 (defcustom hara-auto-jack-in-projects t
   "When non-nil, automatically jack in for files beneath a project.edn.
 Standalone Hara files do not trigger a connection."
-  :type 'boolean)
+  :type 'boolean
+  :group 'hara)
 
 (defcustom hara-connect-timeout 3.0
   "Seconds allowed for endpoint negotiation and server startup."
-  :type 'number)
+  :type 'number
+  :group 'hara)
 
 (defcustom hara-server-start-timeout 15.0
   "Seconds allowed for a newly launched Hara server to publish its endpoint.
 This is longer than `hara-connect-timeout' because a changed runtime may
 need one incremental Maven build before its first startup."
-  :type 'number)
+  :type 'number
+  :group 'hara)
 
 (defcustom hara-cache-directory
   (locate-user-emacs-file "hara/servers/")
   "Directory holding per-project endpoint records."
-  :type 'directory)
+  :type 'directory
+  :group 'hara)
 
 (defcustom hara-inline-result-max-length 120
   "Maximum number of characters displayed in an inline result."
-  :type 'integer)
+  :type 'integer
+  :group 'hara)
 
 (defcustom hara-inline-result-duration 10
   "Seconds before an inline result is removed.
 Set this to nil to retain results until the next edit or evaluation."
-  :type '(choice (const :tag "Until changed" nil) number))
+  :type '(choice (const :tag "Until changed" nil) number)
+  :group 'hara)
 
 (defface hara-inline-result-face
   '((((class color) (background light))
@@ -1237,8 +1263,7 @@ so a partial name is never evaluated."
   "Clear cached project namespace locations after source generation."
   (clrhash hara--namespace-file-cache))
 
-(with-eval-after-load 'hara-manage
-  (add-hook 'hara-manage-after-write-hook #'hara--clear-namespace-file-cache))
+(add-hook 'hara-manage-after-write-hook #'hara--clear-namespace-file-cache)
 
 (cl-defmethod xref-backend-definitions ((_backend (eql hara)) identifier)
   (if-let ((local (hara--local-definition identifier)))
@@ -1465,8 +1490,8 @@ so a partial name is never evaluated."
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.hal\\'" . hara-mode))
 
-;;;###autoload
-(with-eval-after-load 'projectile
+(defun hara--register-projectile ()
+  "Register Hara projects with Projectile when it is available."
   (add-to-list 'projectile-project-root-files "project.edn")
   (add-to-list 'projectile-project-root-files-bottom-up "project.edn")
   (projectile-register-project-type
@@ -1474,6 +1499,17 @@ so a partial name is never evaluated."
    :src-dir "src/"
    :test-dir "test/"
    :test-suffix "_test"))
+
+(defun hara--maybe-register-projectile (&rest _)
+  "Register Hara with Projectile after it has loaded."
+  (when (and (featurep 'projectile)
+             (fboundp 'projectile-register-project-type))
+    (hara--register-projectile)
+    (remove-hook 'after-load-functions #'hara--maybe-register-projectile)))
+
+(if (featurep 'projectile)
+    (hara--maybe-register-projectile)
+  (add-hook 'after-load-functions #'hara--maybe-register-projectile))
 
 (provide 'hara-mode)
 ;;; hara-mode.el ends here

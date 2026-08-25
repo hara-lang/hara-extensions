@@ -6,3 +6,6 @@ dist-*/
 
 # Local desktop metadata
 .DS_Store
+
+# Emacs bytecode is tied to the Emacs version that compiled it.
+hara-emacs/*.elc
