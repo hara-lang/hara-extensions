@@ -1,0 +1,68 @@
+name: Hara Chrome remote language host
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/hara-chrome-remote-host.yml"
+      - "hara-chrome/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/hara-chrome-remote-host.yml"
+      - "hara-chrome/**"
+
+permissions:
+  contents: read
+
+jobs:
+  local-mcp-proof:
+    runs-on: ubuntu-latest
+    env:
+      HARA_RUNTIME: rust
+      HARA_WORKSPACE_ROOT: ${{ github.workspace }}/workspace
+    steps:
+      - name: Check out Hara extensions
+        uses: actions/checkout@v4
+        with:
+          path: workspace/extensions
+          submodules: recursive
+
+      - name: Check out the normative Hara sandbox revision
+        uses: actions/checkout@v4
+        with:
+          repository: hara-lang/hara
+          ref: f76aa907d5d940556a83067b1bfb6cf10a403dcc
+          path: workspace/technology/hara
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: workspace/extensions/hara-chrome/package-lock.json
+
+      - name: Install Rust and the raw-Wasm target
+        uses: dtolnay/rust-toolchain@1.85.1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build the Hara native CLI used for deterministic asset staging
+        working-directory: workspace/technology/hara
+        run: cargo build --manifest-path core/rust/Cargo.toml --release --bin hara
+
+      - name: Run the closed remote-host unit lane
+        working-directory: workspace/extensions/hara-chrome
+        run: make test-remote-fast
+
+      - name: Run the packaged Chromium relay to pure-Wasm proof
+        working-directory: workspace/extensions/hara-chrome
+        run: make test-remote-browser
+
+      - name: Upload Playwright diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hara-chrome-remote-host-playwright
+          path: |
+            workspace/extensions/hara-chrome/test-results/
+            workspace/extensions/hara-chrome/playwright-report/
+          if-no-files-found: ignore
