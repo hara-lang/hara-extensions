@@ -1,8 +1,8 @@
 # Hara for Emacs
 
-`hara-mode.el` provides Hara editing, protocol-4 evaluation, inline results, ElDoc, Company/CAPF
-completion, Xref navigation, Imenu, sessions, project-aware server startup, and a REPL. Its core
-uses built-in Emacs APIs; the optional documentation popup uses `eldoc-box`.
+`hara-mode.el` provides Hara editing, protocol-4 evaluation, inline results, ElDoc, asynchronous
+Eglot completion/diagnostics, Xref navigation, Imenu, sessions, project-aware server startup, and
+a REPL. Its core uses built-in Emacs APIs; the optional documentation popup uses `eldoc-box`.
 
 `hara-manage.el` adds native Foundation-compatible `code.manage` previews, writes, and navigable findings.
 
@@ -50,6 +50,19 @@ location is not already in `load-path`, add it in your Emacs configuration:
 The package install does not install a Hara runtime. Install Hara separately
 from its source checkout with `make install`, or otherwise ensure `hara` is on
 `PATH`.
+
+The shared language service is in `../hara-lsp`. Build and install it with:
+
+```sh
+cd /path/to/hara-extensions/hara-lsp
+make install
+```
+
+When `hara-lsp` is available, opening a project `.hal` file schedules Eglot.
+Diagnostics are shown through Flymake and completion is asynchronous through
+Eglot. Definitions, hover, references, rename, and formatting use the same
+service, so the RESP connection remains available for evaluation and the REPL.
+Set `hara-lsp-command` or `hara-lsp-service-project` to override discovery.
 
 Open a `.hal` file and run `M-x hara-jack-in` or press `C-c C-j`. The client first reuses a
 validated project endpoint, then checks `hara-host`/`hara-port`, and finally starts
@@ -113,6 +126,9 @@ fringe feedback and adaptive wrapping for long values. They clear after the next
 timeout configured by `hara-inline-result-duration` remains a fallback; customize
 `hara-inline-result-max-length` to control truncation.
 ElDoc stays silent until the current buffer has explicitly connected to Hara.
+Evaluation failures open a structured `*Hara Error*` buffer with nested
+namespace/top-level-form context, clickable source locations when the source
+is local, and the runtime stack including coroutine/fiber frames.
 
 ## `code.manage` workflows
 

@@ -30,6 +30,7 @@
 (require 'easymenu)
 (require 'eldoc)
 (require 'imenu)
+(require 'button)
 (require 'hara-manage nil t)
 (require 'project)
 (require 'seq)
@@ -37,23 +38,92 @@
 (require 'xref)
 
 (declare-function eldoc-box-help-at-point "eldoc-box")
+(declare-function eglot-ensure "eglot")
+(declare-function eglot-managed-p "eglot")
+(declare-function eglot-reconnect "eglot")
+(declare-function eglot-shutdown "eglot")
+(declare-function eglot-format-buffer "eglot")
+(declare-function eglot-rename "eglot")
 (declare-function projectile-register-project-type "projectile")
 (defvar projectile-project-root-files)
 (defvar projectile-project-root-files-bottom-up)
+(defvar eglot-server-programs)
+(defvar project-find-functions)
+(defvar hara-mode-syntax-table)
 
 (defgroup hara nil "Hara language tooling." :group 'languages)
 
 (defcustom hara-command
-  (or (and (boundp 'load-file-name) load-file-name
+  (or (let ((bin "/home/hoebat/.local/bin/hara-rust-lite"))
+        (and (file-executable-p bin) bin))
+      (and (boundp 'load-file-name) load-file-name
            (let ((bin (expand-file-name "bin/hara" (file-name-directory load-file-name))))
              (and (file-executable-p bin) bin)))
       "hara")
   "Hara executable used by `hara-jack-in'.
 If you customize this, hara-mode will use your value exactly. Otherwise it
-tries to find a package-local `bin/hara' launcher and falls back to a `hara'
-executable on `exec-path'."
+prefers the installed native lite runtime, then a package-local `bin/hara'
+launcher, and finally a `hara' executable on `exec-path'."
   :type 'string
   :group 'hara)
+
+(defcustom hara-lsp-command '("hara-lsp" "--stdio")
+  "Command used by Eglot for Hara language services."
+  :type '(repeat string)
+  :group 'hara)
+
+(defcustom hara-lsp-service-project nil
+  "Optional path to the Hara project containing `hara.lsp.service'.
+When nil, the hara-lsp host discovers its installed or workspace project."
+  :type '(choice (const :tag "Discover automatically" nil) directory)
+  :group 'hara)
+
+(defcustom hara-enable-eglot t
+  "When non-nil, start the built-in Eglot client for Hara files."
+  :type 'boolean
+  :group 'hara)
+
+(defcustom hara-use-resp-completion nil
+  "When non-nil, also query the synchronous RESP completion endpoint.
+Eglot provides the preferred asynchronous completion path."
+  :type 'boolean
+  :group 'hara)
+
+(defun hara--eglot-contact (&optional _server)
+  "Return the configured Eglot command for Hara buffers."
+  (append hara-lsp-command
+          (when hara-lsp-service-project
+            (list "--service-project"
+                  (expand-file-name hara-lsp-service-project)))))
+
+(defun hara--eglot-register ()
+  "Register Hara's shared language server with Eglot, when loaded."
+  (when (boundp 'eglot-server-programs)
+    (setq eglot-server-programs
+          (cons '(hara-mode . hara--eglot-contact)
+                (cl-remove-if (lambda (entry) (eq (car entry) 'hara-mode))
+                              eglot-server-programs)))))
+
+(defun hara--eglot-available-p ()
+  "Return non-nil when the configured Hara LSP command can be started."
+  (and hara-enable-eglot
+       (require 'eglot nil t)
+       (let ((program (car hara-lsp-command)))
+         (or (and (file-name-absolute-p program)
+                  (file-executable-p program))
+             (executable-find program)))))
+
+(defun hara--eglot-managed-p ()
+  "Return non-nil when Eglot currently manages the buffer."
+  (and (fboundp 'eglot-managed-p)
+       (eglot-managed-p)))
+
+(defun hara--maybe-start-eglot ()
+  "Arrange for Eglot to start for a file-backed Hara project buffer."
+  (when (and buffer-file-name
+             (hara--eglot-available-p))
+    (hara--eglot-register)
+    (eglot-ensure)))
 
 (defun hara--package-bin ()
   "Return the path to the package-local bin/hara launcher, if any."
@@ -318,9 +388,11 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
            (setq pending (plist-put pending :result (nth 2 frame)))
            (puthash id pending (hara-connection-pending connection)))
           ("ERROR"
-           (setq pending
-                 (plist-put pending :error
-                            (list (nth 2 frame) (nth 3 frame))))
+           (let ((error (list (nth 2 frame) (nth 3 frame)))
+                 (details (nthcdr 4 frame)))
+             (when details
+               (setq error (append error (list :details details))))
+             (setq pending (plist-put pending :error error)))
            (puthash id pending (hara-connection-pending connection)))
           ("DONE"
            (remhash id (hara-connection-pending connection))
@@ -339,6 +411,17 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
         (when-let ((project (project-current nil)))
           (project-root project))
         default-directory))))
+
+(defun hara--project-find (directory)
+  "Return a `project.el' project for DIRECTORY when it contains project.edn."
+  (when-let ((root (locate-dominating-file directory "project.edn")))
+    (cons 'hara (file-name-as-directory (file-truename root)))))
+
+(cl-defmethod project-root ((project (head hara)))
+  "Return the root for a Hara project instance."
+  (cdr project))
+
+(add-hook 'project-find-functions #'hara--project-find)
 
 (defun hara--project-file-root ()
   "Return the nearest project.edn root for the current file."
@@ -738,7 +821,11 @@ Stop an Emacs-owned server; otherwise close only the client connection."
                 (funcall success value))
             success)))
     (puthash id (list :success success-callback
-                      :failure (or failure #'hara--show-error))
+                      :failure (or failure
+                                   (lambda (error)
+                                     (hara--show-error
+                                      error
+                                      (hara-connection-root connection)))))
              (hara-connection-pending connection))
     (hara--send-value
      (hara-connection-process connection)
@@ -763,13 +850,220 @@ Stop an Emacs-owned server; otherwise close only the client connection."
     (when error (error "Hara %s: %s" (car error) (cadr error)))
     result))
 
-(defun hara--show-error (error)
-  (with-current-buffer (get-buffer-create "*Hara Error*")
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (insert (format "Hara %s\n\n%s\n" (car error) (cadr error)))
-      (special-mode))
-    (display-buffer (current-buffer))))
+(defun hara--error-details (error)
+  "Return structured runtime details carried by ERROR, if present."
+  (when-let ((marker (member :details (cddr error))))
+    (cadr marker)))
+
+(defun hara--error-field (value &rest keys)
+  "Find the first of KEYS in a plist, alist, flat list, or hash table VALUE."
+  (catch 'found
+    (dolist (key keys)
+      (let ((candidate
+             (cond
+              ((hash-table-p value)
+               (or (gethash key value)
+                   (gethash (format "%s" key) value)))
+              ((listp value)
+               (or (plist-get value key)
+                   (let ((entry (or (assq key value)
+                                    (assq (format "%s" key) value))))
+                     (when entry
+                       (if (consp (cdr entry))
+                           (cadr entry)
+                         (cdr entry))))
+                   (let ((remaining value)
+                         result)
+                     (while (and (consp remaining) (consp (cdr remaining)))
+                       (when (or (equal (car remaining) key)
+                                 (equal (format "%s" (car remaining))
+                                        (format "%s" key)))
+                         (setq result (cadr remaining)
+                               remaining nil))
+                       (when remaining (setq remaining (cddr remaining))))
+                     result)))
+              (t nil))))
+        (when candidate (throw 'found candidate))))
+    nil))
+
+(defun hara--error-contexts (error)
+  "Extract nested namespace/top-level-form pairs from an Hara ERROR."
+  (let ((message (format "%s" (cadr error)))
+        (position 0)
+        contexts)
+    (while (string-match
+            "\\(?:\\`\\|: \\)\\([[:alnum:]_.-]+\\): top-level form[[:space:]]+\\([0-9]+\\)"
+            message position)
+      (push (list (match-string 1 message)
+                  (string-to-number (match-string 2 message)))
+            contexts)
+      (setq position (match-end 0)))
+    (nreverse contexts)))
+
+(defun hara--error-stack-lines-value (value)
+  "Flatten string and collection VALUE into possible stack lines."
+  (cond
+   ((stringp value) (split-string value "\\n" t))
+   ((vectorp value) (hara--error-stack-lines-value (append value nil)))
+   ((listp value)
+    (let (result)
+      (dolist (item value result)
+        (setq result
+              (append result (hara--error-stack-lines-value item))))))
+   (t nil)))
+
+(defun hara--error-stack-lines (error)
+  "Return runtime stack lines, retaining coroutine/fiber frames."
+  (let ((lines (hara--error-stack-lines-value (hara--error-details error))))
+    (when (null lines)
+      (setq lines (hara--error-stack-lines-value (cadr error))))
+    (seq-filter
+     (lambda (line)
+       (or (string-match-p "\\[hara stack\\]" line)
+           (string-match-p "^[[:space:]]*at[[:space:]]" line)
+           (string-match-p "^[[:space:]]*coroutine\\|^[[:space:]]*fiber" line)))
+     lines)))
+
+(defun hara--top-level-form-location (file number)
+  "Return (LINE . COLUMN) for top-level form NUMBER in FILE.
+This is a tolerant source scan used when the runtime only reports a form
+ordinal."
+  (when (and (stringp file) (file-readable-p file) (> number 0))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (let ((depth 0)
+            (forms 0)
+            (in-string nil)
+            (in-comment nil)
+            (escaped nil)
+            location)
+        (while (and (< (point) (point-max)) (null location))
+          (let ((character (char-after)))
+            (cond
+             (in-comment
+              (when (= character ?\n)
+                (setq in-comment nil)))
+             (in-string
+              (cond
+               ((and (not escaped) (= character ?\"))
+                (setq in-string nil))
+               ((and (= character ?\\) (not escaped))
+                (setq escaped t))
+               (t (setq escaped nil))))
+             ((= character ?\;)
+              (setq in-comment t))
+             ((= character ?\")
+              (setq in-string t escaped nil))
+             ((= character ?\()
+              (when (= depth 0)
+                (setq forms (1+ forms))
+                (when (= forms number)
+                  (setq location (cons (line-number-at-pos)
+                                       (1+ (current-column))))))
+              (setq depth (1+ depth)))
+             ((and (= character ?\)) (> depth 0))
+              (setq depth (1- depth))))
+            (forward-char 1)))
+        location))))
+
+(defun hara--error-location-file (file root)
+  "Make FILE absolute against ROOT when necessary."
+  (if (and (stringp file) (not (file-name-absolute-p file)))
+      (expand-file-name file root)
+    file))
+
+(defun hara--error-context-entry (context root)
+  "Resolve CONTEXT against ROOT and return namespace/form/source location."
+  (let* ((namespace (car context))
+         (form (cadr context))
+         (file (and root (hara--namespace-file root namespace)))
+         (location (and file (hara--top-level-form-location file form))))
+    (list namespace form file (car location) (cdr location))))
+
+(defun hara--visit-error-location (button)
+  "Visit the source location stored on BUTTON."
+  (let ((location (button-get button 'hara-location)))
+    (when (and (consp location) (car location))
+      (find-file (car location))
+      (goto-char (point-min))
+      (forward-line (1- (or (nth 1 location) 1)))
+      (move-to-column (max 0 (1- (or (nth 2 location) 1)))))))
+
+(defun hara--insert-error-location (label location)
+  "Insert LABEL as a clickable source LOCATION when one is available."
+  (if (and (consp location) (car location) (nth 1 location))
+      (insert-text-button
+       label
+       'hara-location location
+       'action #'hara--visit-error-location
+       'follow-link t
+       'help-echo "Visit Hara source location")
+    (insert label)))
+
+(defun hara--error-runtime-location (error)
+  "Return a file/line/column location embedded in structured ERROR details."
+  (let* ((details (hara--error-details error))
+         (file (hara--error-field details :file "file" "FILE" :path "path"))
+         (line (hara--error-field details :line "line" "LINE" :row "row"))
+         (column (hara--error-field details :column "column" "COLUMN" :col "col")))
+    (when (and file line)
+      (list file (if (numberp line) line (string-to-number line))
+            (if (numberp column) column (string-to-number (or column "1")))))))
+
+(defun hara--error-short-message (error)
+  "Return a compact first-line summary for inline error overlays."
+  (car (split-string (format "%s" (cadr error)) "\\n" t)))
+
+(defun hara--show-error (error &optional project-root)
+  (let* ((source-buffer (current-buffer))
+         (root (or project-root
+                   (with-current-buffer source-buffer
+                     (ignore-errors (hara--project-root)))))
+         (buffer (get-buffer-create "*Hara Error*"))
+         (contexts (hara--error-contexts error))
+         (stack (hara--error-stack-lines error))
+         (runtime-location (hara--error-runtime-location error)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Hara %s\n\n%s\n"
+                        (car error) (cadr error)))
+        (when contexts
+          (insert "\nSource contexts:\n")
+          (dolist (context contexts)
+            (let* ((entry (hara--error-context-entry context root))
+                   (namespace (nth 0 entry))
+                   (form (nth 1 entry))
+                   (file (nth 2 entry))
+                   (line (nth 3 entry))
+                   (column (nth 4 entry)))
+              (insert (format "  %s: top-level form %d"
+                             namespace form))
+              (if (and file line)
+                  (progn
+                    (insert " — ")
+                    (hara--insert-error-location
+                     (format "%s:%d:%d" file line (or column 1))
+                     (list file line (or column 1))))
+                (insert " — source location unavailable"))
+              (insert "\n"))))
+        (when runtime-location
+          (insert "\nRuntime location: ")
+          (hara--insert-error-location
+           (format "%s:%d:%d"
+                   (hara--error-location-file (nth 0 runtime-location) root)
+                   (nth 1 runtime-location)
+                   (nth 2 runtime-location))
+           (list (hara--error-location-file (nth 0 runtime-location) root)
+                 (nth 1 runtime-location)
+                 (nth 2 runtime-location))))
+        (insert "\nHara stack (including coroutine/fiber frames):\n")
+        (if stack
+            (dolist (line stack) (insert "  " line "\n"))
+          (insert "  No runtime stack details returned.\n"))
+        (special-mode)))
+    (display-buffer buffer)))
 
 (defun hara--clear-result-overlay (&rest _)
   (remove-hook 'post-command-hook #'hara--clear-result-overlay t)
@@ -940,9 +1234,10 @@ Stop an Emacs-owned server; otherwise close only the client connection."
        (hara--display-result connection value marker)
        (when (markerp marker) (set-marker marker nil)))
      (lambda (error)
-       (hara--show-error error)
+       (hara--show-error error (hara-connection-root connection))
        (hara--display-inline
-        marker (format "%s: %s" (car error) (cadr error))
+        marker (format "%s: %s" (car error)
+                       (hara--error-short-message error))
         (hara--result-face 'error))
        (when (markerp marker) (set-marker marker nil))))))
 
@@ -997,7 +1292,7 @@ so a partial name is never evaluated."
                (goto-char insertion-point)
                (insert value)))))
        (lambda (error)
-         (hara--show-error error))))))
+         (hara--show-error error (hara-connection-root connection)))))))
 
 ;;;###autoload
 (defun hara-eval-defun ()
@@ -1024,11 +1319,20 @@ so a partial name is never evaluated."
    ((listp value) (seq-filter #'stringp value))
    (t nil)))
 
+(defun hara--completion-candidate-allowed-p (candidate)
+  "Return non-nil when CANDIDATE is useful at the Hara source level."
+  (and (stringp candidate)
+       (not (string-prefix-p "co/std.native." candidate))
+       (not (string-prefix-p "std.native." candidate))
+       (not (string-prefix-p "co/" candidate))))
+
 (defun hara--completion-candidates (value prefix)
   (let ((candidates (append (hara--normalize-completions value)
                             hara--static-completions)))
     (sort (delete-dups
-           (seq-filter (lambda (candidate) (string-prefix-p prefix candidate))
+           (seq-filter (lambda (candidate)
+                        (and (hara--completion-candidate-allowed-p candidate)
+                             (string-prefix-p prefix candidate)))
                        candidates))
           #'string-lessp)))
 
@@ -1045,7 +1349,8 @@ so a partial name is never evaluated."
         (concat " " signature))))))
 
 (defun hara-completion-at-point ()
-  (unless (nth 8 (syntax-ppss))
+  (unless (or (hara--eglot-managed-p)
+              (nth 8 (syntax-ppss)))
     (let* ((end (point))
            (start (save-excursion
                     (skip-syntax-backward "w_")
@@ -1056,7 +1361,7 @@ so a partial name is never evaluated."
                              (hara-connection-process hara--connection))
                             hara--connection))
            runtime)
-      (when connection
+      (when (and connection hara-use-resp-completion)
         (condition-case error
             (setq runtime
                   (hara--request-sync connection "COMPLETE" (list prefix)))
@@ -1285,6 +1590,167 @@ so a partial name is never evaluated."
                                       column
                                     (string-to-number (or column "1")))))))))))
 
+(defun hara--xref-identifier-char-p (character)
+  "Return non-nil when CHARACTER can be part of a Hara identifier."
+  (and character
+       (or (memq (char-syntax character) '(?w ?_))
+           (memq character (string-to-list "-_*+!?<>=/.:&%$")))))
+
+(defun hara--token-spans (source identifier)
+  "Return code-only START . END spans for IDENTIFIER in SOURCE."
+  (let ((length (length source))
+        (position 0)
+        (in-string nil)
+        (in-comment nil)
+        (escaped nil)
+        result)
+    (while (< position length)
+      (let ((character (aref source position)))
+        (cond
+         (in-comment
+          (setq in-comment (not (= character ?\n))
+                position (1+ position)))
+         (in-string
+          (cond
+           ((and (not escaped) (= character ?\"))
+            (setq in-string nil))
+           ((and (= character ?\\) (not escaped))
+            (setq escaped t))
+           (t (setq escaped nil)))
+          (setq position (1+ position)))
+         ((= character ?\;)
+          (setq in-comment t position (1+ position)))
+         ((= character ?\")
+          (setq in-string t escaped nil position (1+ position)))
+         ((hara--xref-identifier-char-p character)
+          (let ((start position))
+            (while (and (< position length)
+                        (hara--xref-identifier-char-p (aref source position)))
+              (setq position (1+ position)))
+            (when (and (string= identifier (substring source start position))
+                       (or (= start 0)
+                           (not (hara--xref-identifier-char-p
+                                 (aref source (1- start)))))
+                       (or (= position length)
+                           (not (hara--xref-identifier-char-p
+                                 (aref source position)))))
+              (push (cons start position) result))))
+         (t (setq position (1+ position))))))
+    (nreverse result)))
+
+(defun hara--source-files ()
+  "Return readable Hara source files in the current project."
+  (let ((root (hara--project-root))
+        (roots '("src" "src-lang" "lib/src" "lib/src-lang"
+                 "test" "test-lang" "lib/test" "lib/test-lang")))
+    (if (not (file-directory-p root))
+        (and buffer-file-name (list buffer-file-name))
+      (delete-dups
+       (cl-mapcan
+        (lambda (relative)
+          (let ((directory (expand-file-name relative root)))
+            (if (file-directory-p directory)
+                (directory-files-recursively directory "\\.hal\\'" nil nil t)
+              nil)))
+        roots)))))
+
+(defun hara--xref-token-matches (file identifier)
+  "Return xrefs for IDENTIFIER occurrences in FILE's code."
+  (when (and (stringp file) (file-readable-p file))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (let ((source (buffer-substring-no-properties (point-min) (point-max)))
+            result)
+        (dolist (span (hara--token-spans source identifier) (nreverse result))
+          (goto-char (+ (car span) 1))
+          (push (xref-make identifier
+                           (xref-make-file-location
+                            file
+                            (line-number-at-pos)
+                            (current-column)))
+                result))))))
+
+(cl-defmethod xref-backend-references ((_backend (eql hara)) identifier)
+  (mapcan (lambda (file) (hara--xref-token-matches file identifier))
+          (hara--source-files)))
+
+(defun hara--replace-token-in-buffer (old new)
+  "Replace code occurrences of OLD with NEW in the current buffer."
+  (let* ((source (buffer-substring-no-properties (point-min) (point-max)))
+         (spans (hara--token-spans source old))
+         (count (length spans)))
+    (save-excursion
+      (dolist (span (reverse spans))
+        (goto-char (1+ (car span)))
+        (delete-region (point) (+ (point) (- (cdr span) (car span))))
+        (insert new)))
+    count))
+
+(defun hara--rename-on-disk (file old new)
+  "Replace OLD with NEW in FILE and return the number of replacements."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let ((count (hara--replace-token-in-buffer old new)))
+      (when (> count 0)
+        (write-region (point-min) (point-max) file nil 'silent))
+      count)))
+
+(defun hara-lsp-start ()
+  "Start or arrange the Hara Eglot server for the current buffer."
+  (interactive)
+  (unless (hara--eglot-available-p)
+    (user-error "Cannot find Hara LSP command: %s" (car hara-lsp-command)))
+  (hara--eglot-register)
+  (eglot-ensure)
+  (message "Hara language server start scheduled"))
+
+(defun hara-lsp-restart ()
+  "Restart the Eglot Hara language server."
+  (interactive)
+  (if-let ((server (and (fboundp 'eglot-current-server)
+                        (eglot-current-server))))
+      (eglot-reconnect server)
+    (hara-lsp-start)))
+
+(defun hara-lsp-stop ()
+  "Stop the current Eglot Hara language server."
+  (interactive)
+  (if-let ((server (and (fboundp 'eglot-current-server)
+                        (eglot-current-server))))
+      (eglot-shutdown server)
+    (message "No Hara language server is running")))
+
+(defun hara-lsp-format-buffer ()
+  "Format the current buffer through the Hara language server."
+  (interactive)
+  (unless (hara--eglot-managed-p)
+    (user-error "Current buffer is not managed by the Hara language server"))
+  (eglot-format-buffer))
+
+(defun hara-lsp-find-references ()
+  "Find references to the Hara symbol at point."
+  (interactive)
+  (xref-find-references (or (hara--symbol-at-point)
+                            (user-error "No Hara symbol at point"))))
+
+(defun hara-rename-symbol (new-name)
+  "Rename the Hara symbol at point to NEW-NAME."
+  (interactive (list (read-string "Rename Hara symbol to: ")))
+  (unless (string-match-p "\\`[^[:space:]]+\\'" new-name)
+    (user-error "New Hara name must be a single non-whitespace token"))
+  (if (hara--eglot-managed-p)
+      (eglot-rename new-name)
+    (let* ((old (or (hara--symbol-at-point)
+                    (user-error "No Hara symbol at point")))
+           (files (hara--source-files))
+           (changed (apply #'+
+                          (or (mapcar (lambda (file)
+                                        (hara--rename-on-disk file old new-name))
+                                      files)
+                              '(0)))))
+      (message "Renamed %s to %s in %d file%s"
+               old new-name changed (if (= changed 1) "" "s")))))
+
 (defconst hara-imenu-generic-expression
   '(("Definitions"
      "^(\\(?:declare\\|def-?\\|defenum\\|defmacro\\|defmethod\\|defmulti\\|defn-?\\|defprotocol\\|defrecord\\|defstruct\\|deftype\\)\\s-+\\([^][(){}[:space:]]+\\)"
@@ -1423,6 +1889,17 @@ so a partial name is never evaluated."
     ("(\\(?:defenum\\|defprotocol\\|defrecord\\|defstruct\\|deftype\\)\\s-+\\(\\(?:\\sw\\|\\s_\\)+\\)"
      1 font-lock-type-face)))
 
+(defvar hara-lsp-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "s") #'hara-lsp-start)
+    (define-key map (kbd "r") #'hara-lsp-restart)
+    (define-key map (kbd "x") #'hara-lsp-stop)
+    (define-key map (kbd "f") #'hara-lsp-format-buffer)
+    (define-key map (kbd "d") #'xref-find-definitions)
+    (define-key map (kbd "R") #'hara-lsp-find-references)
+    (define-key map (kbd "n") #'hara-rename-symbol)
+    map))
+
 (defvar hara-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-j") #'hara-jack-in)
@@ -1438,6 +1915,8 @@ so a partial name is never evaluated."
     (define-key map (kbd "C-c C-t") #'hara-test-file)
     (define-key map (kbd "C-c C-a") #'hara-test-project)
     (define-key map (kbd "C-c C-o") #'hara-toggle-source-test)
+    (define-key map (kbd "C-c C-l") hara-lsp-map)
+    (define-key map (kbd "C-c C-n") #'hara-rename-symbol)
     (define-key map (kbd "M-.") #'xref-find-definitions)
     map))
 
@@ -1454,6 +1933,9 @@ so a partial name is never evaluated."
     ["Toggle source/test" hara-toggle-source-test t]
     "---"
     ["Jack in" hara-jack-in t]
+    ["Start language server" hara-lsp-start t]
+    ["Restart language server" hara-lsp-restart t]
+    ["Format buffer" hara-lsp-format-buffer t]
     ["Interrupt evaluation" hara-interrupt t]
     ["REPL" hara-repl t]))
 
@@ -1471,7 +1953,8 @@ so a partial name is never evaluated."
   (add-hook 'xref-backend-functions #'hara--xref-backend nil t)
   (add-hook 'after-change-functions #'hara--clear-result-overlay nil t)
   (eldoc-mode 1)
-  (hara--schedule-auto-jack-in))
+  (hara--schedule-auto-jack-in)
+  (hara--maybe-start-eglot))
 
 (define-minor-mode hara-connected-mode
   "Show and manage the current Hara project connection."

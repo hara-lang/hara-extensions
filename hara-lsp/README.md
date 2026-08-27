@@ -1,22 +1,37 @@
 # hara-lsp
 
-Planned Language Server Protocol (LSP) server for hara (`.hal` files).
+The shared Hara language service for `.hal` buffers.
 
-Status: **placeholder** — no implementation yet.
+The service itself is native Hara in [`src/hara/lsp/service.hal`](src/hara/lsp/service.hal). It delegates parsing and semantic findings to `tool.lint.analyze`, keeps an open-document registry, and exposes diagnostics, completion, hover, definitions, document/workspace symbols, references, rename, and formatting through a small LSP JSON-RPC host.
 
-## Intent
+The Rust executable in [`src/main.rs`](src/main.rs) owns only the process boundary:
 
-A single language server that editor clients talk to over LSP, so
-language smarts (diagnostics, completion, hover, go-to-definition,
-project-aware namespace loading via `project.hal`) live in one place
-instead of being re-implemented per editor.
+1. Read Content-Length framed JSON-RPC from stdin.
+2. Start a Hara lite runtime in headless RESP mode.
+3. Evaluate the Hara service with JSON values.
+4. Write LSP responses and `publishDiagnostics` notifications to stdout.
 
-Planned clients:
+This keeps editor protocol concerns out of Hara while keeping language behavior in Hara. RESP remains the stateful evaluation/REPL protocol used by `hara-mode`; LSP is the asynchronous analysis path.
 
-- [`hara-vscode`](../hara-vscode/) — VS Code extension (currently
-  self-contained; will become an LSP client)
-- [`hara-emacs`](../hara-emacs/) — Emacs mode (via `lsp-mode` / `eglot`)
+## Build and install
 
-Open design questions (implementation language — Java on the Truffle
-runtime vs. Rust on the embedding runtime; feature scope) are tracked in
-the project issue tracker.
+```sh
+cargo check
+cargo build --release
+make install
+```
+
+By default, installation places `hara-lsp` in `~/.local/bin` and the Hara service project in `~/.local/share/hara-lsp`. The host discovers the runtime in this order:
+
+1. `--runtime PATH`;
+2. `HARA_RUNTIME`;
+3. `/home/hoebat/.local/bin/hara-rust-lite`;
+4. `hara-rust-lite`, `hara-lite`, or `hara` on `PATH`.
+
+Set `HARA_LSP_PROJECT` or pass `--service-project PATH` when the service project is outside the workspace or installed share directory.
+
+## Current boundaries
+
+Diagnostics and semantic records are calculated for open documents. References and rename therefore cover the documents known to the running language-service session; Eglot synchronizes buffers as they are visited. Formatting currently removes trailing spaces and tabs, leaving Hara's semantic formatter as a separate future service operation.
+
+The Hara analyzer currently exposes exact parsed block offsets, while some legacy lint findings still carry coarse `block/info` spans. The service recovers the unresolved token range from the finding message so editors underline the actual symbol.

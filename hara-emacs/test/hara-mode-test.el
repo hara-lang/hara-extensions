@@ -20,12 +20,84 @@
     (should (equal (car second) "NEXT"))
     (should (= (cdr second) (length data)))))
 
+(ert-deftest hara-error-frame-retains-structured-details ()
+  (let* ((connection
+          (hara--make-connection
+           :pending (make-hash-table :test #'equal)))
+         (process (make-pipe-process :name "hara-error-details-test"
+                                     :command '("cat") :noquery t)))
+    (unwind-protect
+        (progn
+          (process-put process 'hara-negotiated t)
+          (process-put process 'hara-connection connection)
+          (puthash "E1" (list :failure #'ignore)
+                   (hara-connection-pending connection))
+          (hara--handle-frame
+           process
+           '("ERROR" "E1" "EVAL_ERROR" "outer: top-level form 1: bad"
+             "[hara stack]" "  at coroutine"))
+          (should (equal (plist-get
+                          (gethash "E1" (hara-connection-pending connection))
+                          :error)
+                         '("EVAL_ERROR" "outer: top-level form 1: bad"
+                           :details ("[hara stack]" "  at coroutine")))))
+      (delete-process process))))
+
+(ert-deftest hara-error-contexts-extract-nested-namespaces ()
+  (should (equal
+           (hara--error-contexts
+            '("EVAL_ERROR"
+              "lang.outer: top-level form 1: lang.inner.core: top-level form 7: unbound symbol: resolve"))
+           '(("lang.outer" 1) ("lang.inner.core" 7)))))
+
+(ert-deftest hara-error-buffer-prints-source-contexts ()
+  (let* ((root (make-temp-file "hara-error-project-" t))
+         (file (expand-file-name "src/lang/base/v1/grammar_spec.hal" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory file) t)
+          (with-temp-file (expand-file-name "project.edn" root) (insert "{}"))
+          (with-temp-file file
+            (insert "(ns lang.base.v1.grammar-spec)\n"
+                    "(def first 1)\n"
+                    "(def second resolve)\n"))
+          (with-temp-buffer
+            (setq default-directory root)
+            (cl-letf (((symbol-function 'display-buffer) #'ignore))
+              (hara--show-error
+               '("EVAL_ERROR"
+                 "lang.base.v1.grammar-spec: top-level form 3: unbound symbol: resolve"
+                 :details ("[hara stack]" "  at coroutine/fiber"))))
+            (with-current-buffer "*Hara Error*"
+              (should (string-match-p "Source contexts:" (buffer-string)))
+              (should (string-match-p "lang.base.v1.grammar-spec: top-level form 3"
+                                      (buffer-string)))
+              (should (string-match-p "grammar_spec.hal:3:1" (buffer-string)))
+              (should (string-match-p "coroutine/fiber" (buffer-string))))))
+      (when (get-buffer "*Hara Error*") (kill-buffer "*Hara Error*"))
+      (delete-directory root t))))
+
 (ert-deftest hara-resp-encodes-utf8-by-byte-length ()
   (let ((encoded (hara--resp-encode-value "hé")))
     (should (equal encoded
                    (concat "$3\r\n"
                            (encode-coding-string "hé" 'utf-8 t)
                            "\r\n")))))
+
+(ert-deftest hara-defaults-to-the-requested-lite-runtime ()
+  (when (file-executable-p "/home/hoebat/.local/bin/hara-rust-lite")
+    (should (equal hara-command "/home/hoebat/.local/bin/hara-rust-lite"))))
+
+(ert-deftest hara-eglot-registration-uses-the-shared-language-server ()
+  (require 'eglot)
+  (let ((eglot-server-programs
+         (cl-remove-if (lambda (entry) (eq (car entry) 'hara-mode))
+                       eglot-server-programs)))
+    (hara--eglot-register)
+    (let ((entry (assq 'hara-mode eglot-server-programs)))
+      (should entry)
+      (should (equal (funcall (cdr entry)) hara-lsp-command))
+      (should (equal (funcall (cdr entry) nil) hara-lsp-command)))))
 
 (ert-deftest hara-protocol-version-accepts-truffle-and-rust-metadata ()
   (should (= 4 (hara--protocol-version '(("PROTO" . 4)))))
@@ -340,6 +412,15 @@
   (should (equal (hara--completion-candidates '("when-let" "when") "when")
                  '("when" "when-let" "when-not"))))
 
+(ert-deftest hara-completion-filters-host-implementation-namespaces ()
+  (let ((candidates (hara--completion-candidates
+                     '("co/std.native.Algo" "std.native.Coroutine"
+                       "std.foundation/resolve")
+                     "")))
+    (should-not (member "co/std.native.Algo" candidates))
+    (should-not (member "std.native.Coroutine" candidates))
+    (should (member "std.foundation/resolve" candidates))))
+
 (ert-deftest hara-completion-works-offline-and-skips-comments-and-strings ()
   (with-temp-buffer
     (hara-mode)
@@ -514,6 +595,42 @@
                                (file-truename file)))
                 (should (= (xref-file-location-line location) 3))
                 (should-not requested)))))
+      (delete-directory root t))))
+
+(ert-deftest hara-xref-references-ignore-comments-and-strings ()
+  (let* ((root (make-temp-file "hara-xref-references-" t))
+         (file (expand-file-name "lib/src/demo/core.hal" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory file) t)
+          (with-temp-file (expand-file-name "project.edn" root) (insert "{}"))
+          (with-temp-file file
+            (insert "(ns demo.core)\n"
+                    "(defn answer [] 1)\n"
+                    "(def result (answer))\n"
+                    "; answer\n"
+                    "\"answer\"\n"))
+          (with-temp-buffer
+            (setq default-directory root)
+            (let ((references (xref-backend-references 'hara "answer")))
+              (should (= (length references) 2))
+              (should (equal (mapcar (lambda (reference)
+                                       (xref-file-location-line
+                                        (xref-item-location reference)))
+                                     references)
+                             '(2 3))))))
+      (delete-directory root t))))
+
+(ert-deftest hara-project-find-uses-project-edn-root ()
+  (let ((root (make-temp-file "hara-project-find-" t)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "project.edn" root) (insert "{}"))
+          (should (equal (hara--project-find root)
+                         (cons 'hara (file-name-as-directory
+                                      (file-truename root)))))
+          (should (equal (project-root (hara--project-find root))
+                         (file-name-as-directory (file-truename root)))))
       (delete-directory root t))))
 
 (ert-deftest hara-interrupt-clears-owned-connection ()

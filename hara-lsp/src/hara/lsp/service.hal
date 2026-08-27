@@ -1,0 +1,600 @@
+(ns hara.lsp.service
+  (:config {:role :internal})
+  (:require [tool.lint.analyze :as analyze]))
+
+;; The service deliberately owns only editor state.  RESP evaluation remains
+;; in hara-mode; this namespace is the shared, stateless-per-request analysis
+;; surface used by the LSP transport.
+(def +state+ (atom {:root nil :documents {}}))
+(def +identifier-chars+
+  "-_*+!?<>=/.:&%$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+(def +static-forms+
+  ["->" "->>" "as->" "case" "catch" "cond" "cond->" "cond->>"
+   "declare" "def" "def-" "defenum" "defmacro" "defmethod" "defmulti"
+   "defn" "defn-" "defprotocol" "defrecord" "defstruct" "deftype"
+   "do" "doseq" "false" "finally" "fn" "for" "if" "if-let" "if-not"
+   "if-some" "in-ns" "let" "loop" "new" "nil" "ns" "ns+" "protocol"
+   "quote" "recur" "require" "some->" "some->>" "syntax-quote" "throw"
+   "true" "try" "when" "when-let" "when-not" "while" "with-local-vars"
+   "with-open" "with-redefs"])
+
+(defn reset!
+  "Reset the service's document registry to its deterministic baseline."
+  []
+  (std.foundation/reset! +state+ {:root nil :documents {}}))
+
+(defn state
+  "Return the current service state."
+  []
+  (std.foundation/deref +state+))
+
+(defn source-position
+  "Convert a zero-based source offset into an LSP position."
+  [source offset]
+  (loop [index 0 line 0 character 0]
+    (if (or (= index offset) (= index (str/length source)))
+      {"line" line "character" character}
+      (if (= \newline (str/char-at source index))
+        (recur (inc index) (inc line) 0)
+        (recur (inc index) line (inc character))))))
+
+(defn offset-at-position
+  "Convert an LSP position into a bounded zero-based source offset."
+  [source position]
+  (let [target-line (or (get position "line") 0)
+        target-character (or (get position "character") 0)]
+    (loop [index 0 line 0 character 0]
+      (if (or (= line target-line)
+              (= index (str/length source)))
+        (min (str/length source) (+ index target-character))
+        (if (= \newline (str/char-at source index))
+          (recur (inc index) (inc line) 0)
+          (recur (inc index) line (inc character)))))))
+
+(defn identifier-char?
+  "Return true when CHARACTER belongs to a Hara identifier."
+  [character]
+  (and character
+       (>= (str/index-of +identifier-chars+ (str character)) 0)))
+
+(defn identifier-at-offset
+  "Return the identifier surrounding OFFSET, including Hara punctuation."
+  [source offset]
+  (let [length (str/length source)
+        bounded (max 0 (min offset length))
+        start
+        (loop [index bounded]
+          (if (and (> index 0)
+                   (identifier-char? (str/char-at source (dec index))))
+            (recur (dec index))
+            index))
+        end
+        (loop [index bounded]
+          (if (and (< index length) (identifier-char? (str/char-at source index)))
+            (recur (inc index))
+            index))]
+    (if (= start end)
+      nil
+      {"text" (str/slice source start end) "start" start "end" end})))
+
+(defn identifier-at-position
+  "Return the identifier at an LSP position in SOURCE."
+  [source position]
+  (identifier-at-offset source (offset-at-position source position)))
+
+(defn token-boundary?
+  "Return true when a token occurrence is not embedded in another token."
+  [source start end]
+  (and (or (= start 0) (not (identifier-char? (str/char-at source (dec start)))))
+       (or (= end (str/length source))
+           (not (identifier-char? (str/char-at source end))))))
+
+(defn token-offsets
+  "Scan code tokens while ignoring comments and quoted strings."
+  [source]
+  (let [length (str/length source)]
+    (loop [index 0 in-string false in-comment false output []]
+      (if (= index length)
+        output
+        (let [character (str/char-at source index)]
+          (cond
+            in-comment
+            (if (= character \newline)
+              (recur (inc index) false false output)
+              (recur (inc index) false true output))
+
+            in-string
+            (if (and (= character \")
+                     (or (= index 0) (not= (str/char-at source (dec index)) \\)))
+              (recur (inc index) false false output)
+              (recur (inc index) true false output))
+
+            (= character \;)
+            (recur (inc index) false true output)
+
+            (= character \")
+            (recur (inc index) true false output)
+
+            (identifier-char? character)
+            (let [token (identifier-at-offset source index)]
+              (recur (get token "end") false false (conj output token)))
+
+            :else
+            (recur (inc index) false false output)))))))
+
+(defn message-token
+  "Extract the unresolved token from a lint finding message."
+  [message]
+  (let [prefix "unresolved symbol: "
+        index (str/index-of message prefix)]
+    (when (and (>= index 0) (< (+ index (str/length prefix)) (str/length message)))
+      (str/trim (str/slice message (+ index (str/length prefix)))))))
+
+(defn finding-offset
+  "Recover a finding offset, compensating for legacy block/info spans."
+  [source finding]
+  (let [explicit (or (:start-offset finding) 0)
+        token (message-token (str (:message finding)))]
+    (if token
+      (let [found (str/index-of source token explicit)]
+        (if (>= found 0) found explicit))
+      explicit)))
+
+(defn finding-end-offset
+  "Return the end offset for a finding."
+  [source finding]
+  (let [start (finding-offset source finding)
+        token (message-token (str (:message finding)))]
+    (if token (+ start (str/length token)) (or (:end-offset finding) start))))
+
+(defn range-from-offsets
+  "Build an LSP range from zero-based source offsets."
+  [source start end]
+  {"start" (source-position source start)
+   "end" (source-position source end)})
+
+(defn block-range
+  "Build an LSP range from a parsed Hara block."
+  [source value]
+  (let [props (:props value)
+        start (or (:start-offset props) 0)
+        end (or (:end-offset props) start)]
+    (range-from-offsets source start end)))
+
+(defn finding-range
+  "Build an LSP range for a lint finding."
+  [source finding]
+  (range-from-offsets source
+                      (finding-offset source finding)
+                      (finding-end-offset source finding)))
+
+(defn diagnostic-severity
+  "Map a Hara lint level to an LSP diagnostic severity."
+  [level]
+  (if (= level :warning) 2 1))
+
+(defn diagnostic
+  "Convert a Hara lint finding into an LSP diagnostic."
+  [source finding]
+  {"range" (finding-range source finding)
+   "severity" (diagnostic-severity (:level finding))
+   "source" "hara"
+   "message" (str (:message finding))})
+
+(defn safe-analysis
+  "Analyze SOURCE and turn analyzer failures into a service diagnostic."
+  [source]
+  (try
+    (analyze/analyze-source source {:file "<memory>"})
+    (catch Throwable error
+      {:findings [] :definitions [] :error (str error)})))
+
+(defn diagnostics-for
+  "Return LSP diagnostics for SOURCE."
+  [source]
+  (let [analysis (safe-analysis source)
+        findings (:findings analysis)
+        diagnostics (vec (map (fn [finding] (diagnostic source finding)) findings))]
+    (if-let [error (:error analysis)]
+      (conj diagnostics
+            {"range" (range-from-offsets source 0 0)
+             "severity" 1
+             "source" "hara"
+             "message" error})
+      diagnostics)))
+
+(defn document-entry
+  "Return a stored document entry by URI."
+  [uri]
+  (get-in (state) [:documents uri]))
+
+(defn diagnostics-notification
+  "Build the publishDiagnostics notification for URI and SOURCE."
+  [uri source]
+  {"jsonrpc" "2.0"
+   "method" "textDocument/publishDiagnostics"
+   "params" {"uri" uri "diagnostics" (diagnostics-for source)}})
+
+(defn store-document!
+  "Store URI, SOURCE, and its current analysis state."
+  [uri source version]
+  (let [analysis (safe-analysis source)
+        entry {:uri uri :text source :version version :analysis analysis}]
+    (std.foundation/swap! +state+
+                           (fn [current]
+                             (assoc-in current [:documents uri] entry)))
+    entry))
+
+(defn remove-document!
+  "Remove URI from the open-document registry."
+  [uri]
+  (std.foundation/swap! +state+
+                         (fn [current]
+                           (update current :documents dissoc uri)))
+  nil)
+
+(defn definition-name
+  "Return a definition's unqualified printable name."
+  [definition]
+  (str (:name definition)))
+
+(defn definition-qualified-name
+  "Return a definition's qualified printable name."
+  [definition]
+  (str (:qualified definition)))
+
+(defn definition-kind
+  "Return an LSP symbol kind for a Hara definition."
+  [definition]
+  (let [kind (:kind definition)]
+    (cond
+      (= kind :function) 12
+      (= kind :macro) 12
+      (= kind :struct) 23
+      :else 13)))
+
+(defn definition-records
+  "Return analysis definitions with stable printable fields."
+  [analysis]
+  (vec
+   (map (fn [definition]
+          {:name (definition-name definition)
+           :qualified (definition-qualified-name definition)
+           :kind (definition-kind definition)
+           :block (:block definition)})
+        (or (:definitions analysis) []))))
+
+(defn definition-location
+  "Build an LSP location for a definition record."
+  [uri source definition]
+  {"uri" uri "range" (block-range source (:block definition))})
+
+(defn definition-symbol
+  "Build an LSP document symbol for a definition record."
+  [uri source definition]
+  (let [range (block-range source (:block definition))
+        name (:name definition)]
+    {"name" name
+     "kind" (:kind definition)
+     "range" range
+     "selectionRange" range
+     "detail" (:qualified definition)}))
+
+(defn identifier-matches?
+  "Return true when TOKEN names DEFINITION."
+  [token definition]
+  (or (= token (:name definition))
+      (= token (:qualified definition))))
+
+(defn matching-definitions
+  "Find definitions named TOKEN in ANALYSIS."
+  [analysis token]
+  (vec (filter (fn [definition] (identifier-matches? token definition))
+              (definition-records analysis))))
+
+(defn completion-allowed?
+  "Hide host implementation namespace identities from editor completion."
+  [label]
+  (and (string? label)
+       (not (str/starts-with? label "co/std.native."))
+       (not (str/starts-with? label "std.native."))
+       (not (str/starts-with? label "co/"))))
+
+(defn completion-labels
+  "Return filtered completion labels for a document and prefix."
+  [entry prefix]
+  (let [definitions (map (fn [definition] (:qualified definition))
+                         (definition-records (:analysis entry)))
+        names (map (fn [definition] (:name definition))
+                   (definition-records (:analysis entry)))
+        candidates (concat +static-forms+ definitions names)]
+    (vec
+     (sort
+      (distinct
+       (filter (fn [label]
+                 (and (completion-allowed? label)
+                      (str/starts-with? label prefix)))
+               candidates))))))
+
+(defn completion-item
+  "Build one LSP completion item."
+  [label]
+  {"label" label "kind" 3})
+
+(defn completion-result
+  "Return completion items for URI and position."
+  [uri position]
+  (let [entry (document-entry uri)
+        source (or (:text entry) "")
+        identifier (identifier-at-position source position)
+        prefix (or (and identifier (get identifier "text")) "")]
+    {"isIncomplete" false
+     "items" (vec (map completion-item
+                        (completion-labels entry prefix)))}))
+
+(defn definition-result
+  "Return definition locations for the token at POSITION."
+  [uri position]
+  (let [entry (document-entry uri)
+        source (or (:text entry) "")
+        identifier (identifier-at-position source position)
+        token (and identifier (get identifier "text"))]
+    (if (and entry token)
+      (vec (map (fn [definition]
+                  (definition-location uri source definition))
+                (matching-definitions (:analysis entry) token)))
+      [])))
+
+(defn document-symbol-result
+  "Return document symbols for URI."
+  [uri]
+  (let [entry (document-entry uri)
+        source (or (:text entry) "")]
+    (if entry
+      (vec (map (fn [definition]
+                  (definition-symbol uri source definition))
+                (definition-records (:analysis entry))))
+      [])))
+
+(defn workspace-symbol-result
+  "Return open-document symbols matching QUERY."
+  [query]
+  (vec
+   (reduce-kv
+    (fn [output uri entry]
+      (let [source (:text entry)]
+        (into output
+              (map (fn [definition]
+                     (definition-symbol uri source definition))
+                   (filter (fn [definition]
+                             (str/includes? (:qualified definition) query))
+                           (definition-records (:analysis entry)))))))
+    []
+    (:documents (state)))))
+
+(defn hover-result
+  "Return a compact markdown hover for a known definition."
+  [uri position]
+  (let [entry (document-entry uri)
+        source (or (:text entry) "")
+        identifier (identifier-at-position source position)
+        token (and identifier (get identifier "text"))
+        definitions (and entry token (matching-definitions (:analysis entry) token))]
+    (when (seq definitions)
+      (let [definition (first definitions)]
+        {"contents" {"kind" "markdown"
+                      "value" (str "**" (:qualified definition) "**\n\n"
+                                    "Hara " (if (= (:kind definition) 12)
+                                              "function"
+                                              "definition"))}}))))
+
+(defn reference-records
+  "Return open-document token locations for TOKEN."
+  [token]
+  (vec
+   (reduce-kv
+    (fn [output uri entry]
+      (let [source (:text entry)]
+        (into output
+              (map (fn [item]
+                     {:uri uri :source source :start (get item "start")
+                      :end (get item "end")})
+                   (filter (fn [item]
+                             (and (= token (get item "text"))
+                                  (token-boundary? source
+                                                   (get item "start")
+                                                   (get item "end"))))
+                           (token-offsets source))))))
+    []
+    (:documents (state)))))
+
+(defn references-result
+  "Return references for TOKEN across open documents."
+  [token]
+  (vec
+   (map (fn [record]
+          {"uri" (:uri record)
+           "range" (range-from-offsets (:source record)
+                                        (:start record)
+                                        (:end record))})
+        (reference-records token))))
+
+(defn rename-result
+  "Return an open-document workspace edit for TOKEN."
+  [uri position new-name]
+  (let [entry (document-entry uri)
+        source (or (:text entry) "")
+        identifier (identifier-at-position source position)
+        token (and identifier (get identifier "text"))
+        records (and token (reference-records token))
+        changes
+        (reduce (fn [output record]
+                  (let [record-uri (:uri record)
+                        edit {"range" (range-from-offsets
+                                        (:source record)
+                                        (:start record)
+                                        (:end record))
+                              "newText" new-name}]
+                    (assoc output record-uri
+                           (conj (vec (get output record-uri)) edit))))
+                {}
+                (or records []))]
+    {"changes" changes}))
+
+(defn trailing-whitespace-start
+  "Return the first trailing-space index in LINE, or its length."
+  [line]
+  (loop [index (str/length line)]
+    (if (and (> index 0)
+             (or (= \space (str/char-at line (dec index)))
+                 (= \tab (str/char-at line (dec index)))))
+      (recur (dec index))
+      index)))
+
+(defn formatting-result
+  "Return minimal formatting edits that remove trailing whitespace."
+  [uri]
+  (let [entry (document-entry uri)
+        source (or (:text entry) "")
+        lines (vec (str/split-lines source))]
+    (loop [index 0 offset 0 output []]
+      (if (= index (count lines))
+        output
+        (let [line (nth lines index)
+              start (trailing-whitespace-start line)
+              length (str/length line)
+              next-offset (+ offset length 1)
+              output (if (< start length)
+                       (conj output
+                             {"range" {"start" {"line" index "character" start}
+                                       "end" {"line" index "character" length}}
+                              "newText" ""})
+                       output)]
+          (recur (inc index) next-offset output))))))
+
+(defn text-document-item
+  "Extract a didOpen text document payload."
+  [params]
+  (get params "textDocument"))
+
+(defn open-document
+  "Handle textDocument/didOpen and return its diagnostic notification."
+  [params]
+  (let [document (text-document-item params)
+        uri (get document "uri")
+        source (get document "text")]
+    (store-document! uri source (get document "version"))
+    (diagnostics-notification uri source)))
+
+(defn change-document
+  "Handle textDocument/didChange and return its diagnostic notification."
+  [params]
+  (let [document (text-document-item params)
+        uri (get document "uri")
+        changes (get params "contentChanges")
+        change (first changes)
+        source (get change "text")]
+    (store-document! uri source (get document "version"))
+    (diagnostics-notification uri source)))
+
+(defn close-document
+  "Handle textDocument/didClose."
+  [params]
+  (remove-document! (get (text-document-item params) "uri")))
+
+(defn initialize-result
+  "Return the shared Hara LSP capability declaration."
+  []
+  {"capabilities"
+   {"textDocumentSync" 1
+    "completionProvider" {"triggerCharacters" ["/" "." "-"]}
+    "definitionProvider" true
+    "referencesProvider" true
+    "renameProvider" true
+    "hoverProvider" true
+    "documentSymbolProvider" true
+    "workspaceSymbolProvider" true
+    "documentFormattingProvider" true}})
+
+(defn response
+  "Build an LSP JSON-RPC response."
+  [id result]
+  {"jsonrpc" "2.0" "id" id "result" result})
+
+(defn error-response
+  "Build an LSP JSON-RPC error response."
+  [id code message]
+  {"jsonrpc" "2.0" "id" id
+   "error" {"code" code "message" message}})
+
+(defn request-has-id?
+  "Return true when REQUEST is a request rather than a notification."
+  [request]
+  (not (nil? (get request "id"))))
+
+(defn handle-request
+  "Handle one decoded LSP request and return response/notification envelopes."
+  [request]
+  (let [method (get request "method")
+        params (or (get request "params") {})
+        id (get request "id")
+        notification (cond
+                       (= method "textDocument/didOpen")
+                       (open-document params)
+
+                       (= method "textDocument/didChange")
+                       (change-document params)
+
+                       (= method "textDocument/didClose")
+                       (do (close-document params) nil)
+
+                       :else nil)
+        result (cond
+                 (= method "initialize") (do (hara.lsp.service/reset!) (initialize-result))
+                 (= method "shutdown") nil
+                 (= method "textDocument/completion")
+                 (completion-result (get (get params "textDocument") "uri")
+                                    (get params "position"))
+                 (= method "textDocument/definition")
+                 (definition-result (get (get params "textDocument") "uri")
+                                    (get params "position"))
+                 (= method "textDocument/documentSymbol")
+                 (document-symbol-result (get (get params "textDocument") "uri"))
+                 (= method "workspace/symbol")
+                 (workspace-symbol-result (or (get params "query") ""))
+                 (= method "textDocument/hover")
+                 (hover-result (get (get params "textDocument") "uri")
+                               (get params "position"))
+                 (= method "textDocument/references")
+                 (let [uri (get (get params "textDocument") "uri")
+                       entry (document-entry uri)
+                       identifier (identifier-at-position
+                                   (or (:text entry) "")
+                                   (get params "position"))]
+                   (references-result (and identifier (get identifier "text"))))
+                 (= method "textDocument/rename")
+                 (rename-result (get (get params "textDocument") "uri")
+                                (get params "position")
+                                (get params "newName"))
+                 (= method "textDocument/formatting")
+                 (formatting-result (get (get params "textDocument") "uri"))
+                 :else nil)
+        output-response
+        (cond
+          (= method "initialize") (response id result)
+          (= method "shutdown") (response id nil)
+          (and (request-has-id? request)
+               (or result (= method "textDocument/hover")))
+          (response id result)
+          (and (request-has-id? request)
+               (nil? result)
+               (nil? notification))
+          (error-response id -32601 (str "Unknown Hara LSP method: " method))
+          :else nil)]
+    {"response" output-response
+     "notifications" (vec (if notification [notification] []))}))
+
+(defn handle
+  "Handle a decoded JSON-RPC request."
+  [request]
+  (handle-request request))

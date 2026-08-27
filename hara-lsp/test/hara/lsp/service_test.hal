@@ -1,0 +1,59 @@
+(ns hara.lsp.service-test
+  (:use code.test)
+  (:require [hara.lsp.service :as service]))
+
+^{:refer hara.lsp.service/reset!}
+(fact "reset restores an empty service state"
+  (service/reset!)
+  (service/state)
+  => {:root nil :documents {}})
+
+^{:refer hara.lsp.service/identifier-at-offset}
+(fact "identifier extraction keeps Hara punctuation"
+  (service/identifier-at-offset " std.core/mapv " 7)
+  => {"text" "std.core/mapv" "start" 1 "end" 14})
+
+^{:refer hara.lsp.service/safe-analysis}
+(fact "analysis keeps exact definition spans and reports unresolved symbols"
+  (let [analysis (service/safe-analysis "(ns demo)\n(defn answer [] missing)")
+        definition (first (:definitions analysis))
+        finding (first (:findings analysis))]
+    [(:qualified definition)
+     (:start-offset (:props (:block definition)))
+     (:end-offset (:props (:block definition)))
+     (:message finding)]
+    => ['demo/answer 2 7 "unresolved symbol: missing"]))
+
+^{:refer hara.lsp.service/diagnostics-for}
+(fact "diagnostics use the unresolved token's real source range"
+  (let [diagnostic (first (service/diagnostics-for
+                           "(ns demo)\n(defn answer [] missing)"))
+        range (get diagnostic "range")]
+    [(get diagnostic "message")
+     (get (get range "start") "line")
+     (get (get range "start") "character")
+     (get (get range "end") "character")]
+    => ["unresolved symbol: missing" 1 16 23]))
+
+^{:refer hara.lsp.service/completion-allowed?}
+(fact "host implementation namespaces are excluded from completion"
+  [(service/completion-allowed? "co/std.native.Algo")
+   (service/completion-allowed? "std.native.Coroutine")
+   (service/completion-allowed? "std.foundation/resolve")]
+  => [false false true])
+
+^{:refer hara.lsp.service/handle}
+(fact "the service emits an LSP-shaped JSON envelope"
+  (service/reset!)
+  (let [output (service/handle {"jsonrpc" "2.0"
+                                "id" 1
+                                "method" "initialize"
+                                "params" {}})
+        response (get output "response")]
+    [(get response "id")
+     (get response "jsonrpc")
+     (get (get response "result") "capabilities")
+     (get output "notifications")]
+    => [1 "2.0" true []]))
+
+(pr-str (run {:namespace "hara.lsp.service-test"}))

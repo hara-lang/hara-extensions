@@ -1,8 +1,8 @@
 # Hara for Emacs
 
-`hara-mode.el` provides Hara editing, protocol-4 evaluation, inline results, ElDoc, Company/CAPF
-completion, Xref navigation, Imenu, sessions, project-aware server startup, and a REPL. Its core
-uses built-in Emacs APIs; the optional documentation popup uses `eldoc-box`.
+`hara-mode.el` provides Hara editing, protocol-4 evaluation, inline results, ElDoc, asynchronous
+Eglot completion/diagnostics, Xref navigation, Imenu, sessions, project-aware server startup, and
+a REPL. Its core uses built-in Emacs APIs; the optional documentation popup uses `eldoc-box`.
 
 `hara-manage.el` adds native Foundation-compatible `code.manage` previews, writes, and navigable findings.
 
@@ -56,6 +56,19 @@ The package install does not install a Hara runtime. Install Hara separately
 from its source checkout with `make install`, or otherwise ensure `hara` is on
 `PATH`.
 
+The shared language service is in `../hara-lsp`. Build and install it with:
+
+```sh
+cd /path/to/hara-extensions/hara-lsp
+make install
+```
+
+When `hara-lsp` is available, opening a project `.hal` file schedules Eglot.
+Diagnostics are shown through Flymake and completion is asynchronous through
+Eglot. Definitions, hover, references, rename, and formatting use the same
+service, so the RESP connection remains available for evaluation and the REPL.
+Set `hara-lsp-command` or `hara-lsp-service-project` to override discovery.
+
 Open a `.hal` file and run `M-x hara-jack-in` or press `C-c C-j`. The client first reuses a
 validated project endpoint, then checks `hara-host`/`hara-port`, and finally starts
 `hara --port 0 headless`. Emacs-owned servers stop on `M-x hara-disconnect`.
@@ -91,6 +104,10 @@ Common commands:
 - `C-c C-a`: test the whole Hara project
 - `C-c C-o`: toggle between conventional source and test files
 - `C-c C-m`: open the `code.manage` prefix (`s`/`i`/`p`/`n`/`d`/`m`)
+- `C-c C-l s`: start the Hara language server
+- `C-c C-l r`: restart it; `C-c C-l x`: stop it
+- `C-c C-l f`: format the buffer; `C-c C-l R`: find references
+- `C-c C-n`: rename the symbol at point
 - `M-.`: jump to a source-backed definition with Xref
 - `M-,`: return through Xref history
 
@@ -118,6 +135,9 @@ fringe feedback and adaptive wrapping for long values. They clear after the next
 timeout configured by `hara-inline-result-duration` remains a fallback; customize
 `hara-inline-result-max-length` to control truncation.
 ElDoc stays silent until the current buffer has explicitly connected to Hara.
+Evaluation failures open a structured `*Hara Error*` buffer with nested
+namespace/top-level-form context, clickable source locations when the source
+is local, and the runtime stack including coroutine/fiber frames.
 
 ## `code.manage` workflows
 
@@ -168,8 +188,9 @@ make bin-install-rust-lite # install it as ~/.local/bin/hara-rust-lite
 make bin-clean            # remove installed binaries and jar
 ```
 
-The Emacs package ships with `hara-emacs/bin/hara`, which `hara-mode`
-auto-detects and uses as `hara-command`. It runs the Truffle jar by default;
+The default `hara-command` is `/home/hoebat/.local/bin/hara-rust-lite` when
+that executable exists, followed by the package-local `bin/hara`. The package
+launcher runs the Truffle jar by default;
 set `HARA_BACKEND=rust`, `rust-lite`, or `native` to switch backends, or
 customize `hara-command` directly.
 
