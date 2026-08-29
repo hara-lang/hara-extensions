@@ -32,6 +32,18 @@ Set `HARA_LSP_PROJECT` or pass `--service-project PATH` when the service project
 
 ## Current boundaries
 
-Diagnostics and semantic records are calculated for open documents. References and rename therefore cover the documents known to the running language-service session; Eglot synchronizes buffers as they are visited. Formatting currently removes trailing spaces and tabs, leaving Hara's semantic formatter as a separate future service operation.
+Document open/change notifications only store the latest text and version and
+clear stale diagnostics; they do not analyze the source. Completion is a
+latency-sensitive exception: it returns static forms and definitions from an
+analysis already cached for the current version, and never starts semantic
+analysis itself. Other semantic requests (navigation, symbols, hover,
+references, rename, and formatting) analyze a document on demand and cache the
+result by document version. The custom `hara/diagnostics` request performs an
+explicit analysis and publishes a
+`textDocument/publishDiagnostics` notification. References and rename therefore
+cover the documents known to the running language-service session; Eglot
+synchronizes buffers as they are visited. Formatting currently removes trailing
+spaces and tabs, leaving Hara's semantic formatter as a separate future service
+operation.
 
 The Hara analyzer currently exposes exact parsed block offsets, while some legacy lint findings still carry coarse `block/info` spans. The service recovers the unresolved token range from the finding message so editors underline the actual symbol.

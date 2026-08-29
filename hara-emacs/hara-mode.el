@@ -39,17 +39,24 @@
 
 (declare-function eldoc-box-help-at-point "eldoc-box")
 (declare-function eglot-ensure "eglot")
+(declare-function eglot-current-server "eglot")
 (declare-function eglot-managed-p "eglot")
 (declare-function eglot-reconnect "eglot")
 (declare-function eglot-shutdown "eglot")
+(declare-function eglot--path-to-uri "eglot")
+(declare-function jsonrpc-async-request "jsonrpc")
 (declare-function eglot-format-buffer "eglot")
 (declare-function eglot-rename "eglot")
 (declare-function projectile-register-project-type "projectile")
 (defvar projectile-project-root-files)
 (defvar projectile-project-root-files-bottom-up)
 (defvar eglot-server-programs)
+(defvar eglot-stay-out-of nil)
 (defvar project-find-functions)
 (defvar hara-mode-syntax-table)
+(defvar hara-connected-mode)
+(defvar hara--project-autostart-state (make-hash-table :test #'equal)
+  "Project-root keyed automatic service startup state.")
 
 (defgroup hara nil "Hara language tooling." :group 'languages)
 
@@ -92,6 +99,8 @@ Eglot provides the preferred asynchronous completion path."
 (defun hara--eglot-contact (&optional _server)
   "Return the configured Eglot command for Hara buffers."
   (append hara-lsp-command
+          (when-let ((root (hara--project-file-root)))
+            (list "--root" root))
           (when hara-lsp-service-project
             (list "--service-project"
                   (expand-file-name hara-lsp-service-project)))))
@@ -99,6 +108,7 @@ Eglot provides the preferred asynchronous completion path."
 (defun hara--eglot-register ()
   "Register Hara's shared language server with Eglot, when loaded."
   (when (boundp 'eglot-server-programs)
+    (add-hook 'eglot-connect-hook #'hara--eglot-project-connected)
     (setq eglot-server-programs
           (cons '(hara-mode . hara--eglot-contact)
                 (cl-remove-if (lambda (entry) (eq (car entry) 'hara-mode))
@@ -113,17 +123,28 @@ Eglot provides the preferred asynchronous completion path."
                   (file-executable-p program))
              (executable-find program)))))
 
+(defun hara--eglot-project-connected (&rest _arguments)
+  "Mark the current Hara project as having a connected Eglot service."
+  (when-let ((root (hara--project-file-root)))
+    (hara--set-project-state root :lsp :ready)))
+
 (defun hara--eglot-managed-p ()
   "Return non-nil when Eglot currently manages the buffer."
   (and (fboundp 'eglot-managed-p)
        (eglot-managed-p)))
 
 (defun hara--maybe-start-eglot ()
-  "Arrange for Eglot to start for a file-backed Hara project buffer."
-  (when (and buffer-file-name
-             (hara--eglot-available-p))
-    (hara--eglot-register)
-    (eglot-ensure)))
+  "Arrange for Eglot to start once for the current Hara project."
+  (when-let ((root (hara--project-file-root)))
+    (when (hara--eglot-available-p)
+      (hara--eglot-register)
+      (unless (plist-get (gethash root hara--project-autostart-state)
+                         :lsp)
+        (if (and (fboundp 'eglot-current-server)
+                 (eglot-current-server))
+            (hara--set-project-state root :lsp :ready)
+          (hara--set-project-state root :lsp :starting)
+          (eglot-ensure))))))
 
 (defun hara--package-bin ()
   "Return the path to the package-local bin/hara launcher, if any."
@@ -257,6 +278,22 @@ Set this to nil to retain results until the next edit or evaluation."
 (defvar-local hara--eldoc-generation 0)
 (defvar-local hara--auto-jack-in-timer nil)
 
+(defun hara--project-state (root)
+  "Return automatic service state for project ROOT."
+  (gethash root hara--project-autostart-state))
+
+(defun hara--set-project-state (root key value)
+  "Set KEY to VALUE in automatic service state for project ROOT."
+  (let ((state (plist-put (hara--project-state root) key value)))
+    (if (and (null (plist-get state :resp))
+             (null (plist-get state :lsp)))
+        (remhash root hara--project-autostart-state)
+      (puthash root state hara--project-autostart-state))))
+
+(defun hara--clear-project-state (root)
+  "Clear all automatic service state for project ROOT."
+  (remhash root hara--project-autostart-state))
+
 (defun hara--line-end (data start)
   (or (string-match "\r\n" data start)
       (signal 'hara-resp-incomplete nil)))
@@ -359,8 +396,33 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
        (delete-process process)))
     (process-put process 'hara-buffer (substring data position))))
 
+(defun hara--cancel-process-timer (process property)
+  "Cancel and clear PROPERTY's timer on PROCESS, when present."
+  (when-let ((timer (process-get process property)))
+    (cancel-timer timer)
+    (process-put process property nil)))
+
 (defun hara--process-sentinel (process event)
-  (unless (process-live-p process)
+  (let ((callback (process-get process 'hara-open-callback)))
+    (when (and callback
+               (process-live-p process)
+               (string-match-p "\\`open\\(?:\\n\\)?\\'"
+                               (string-trim event)))
+      (condition-case error
+          (progn
+            (process-put process 'hara-open-started t)
+            (hara--send-value process '("HELLO" "4" "CLIENT" "EMACS")))
+        (error
+         (process-put process 'hara-open-callback nil)
+         (hara--cancel-process-timer process 'hara-open-timer)
+         (delete-process process)
+         (funcall callback process nil error)
+         (setq callback nil))))
+    (unless (process-live-p process)
+      (when callback
+        (process-put process 'hara-open-callback nil)
+        (hara--cancel-process-timer process 'hara-open-timer)
+        (funcall callback process nil (string-trim event)))
     (let ((connection (process-get process 'hara-connection)))
       (when connection
         (maphash
@@ -372,11 +434,18 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
         (hara--detach-connection connection)
         (when (eq (gethash (hara-connection-root connection) hara--connections)
                   connection)
-          (remhash (hara-connection-root connection) hara--connections))))))
+          (remhash (hara-connection-root connection) hara--connections)
+          (hara--set-project-state (hara-connection-root connection)
+                                   :resp nil)))))))
 
 (defun hara--handle-frame (process frame)
   (if (not (process-get process 'hara-negotiated))
-      (process-put process 'hara-hello frame)
+      (if-let ((callback (process-get process 'hara-open-callback)))
+          (progn
+            (process-put process 'hara-open-callback nil)
+            (hara--cancel-process-timer process 'hara-open-timer)
+            (funcall callback process frame nil))
+        (process-put process 'hara-hello frame))
     (let* ((connection (process-get process 'hara-connection))
            (kind (and (listp frame) (car frame)))
            (id (and (listp frame) (cadr frame)))
@@ -431,6 +500,17 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
                       (file-name-directory buffer-file-name)
                       "project.edn")))
       (file-name-as-directory (file-truename root)))))
+
+(defun hara--attach-connection-to-project (connection)
+  "Attach CONNECTION to every Hara buffer belonging to its project."
+  (let ((root (hara-connection-root connection)))
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when (and (derived-mode-p 'hara-mode)
+                   (equal (hara--project-file-root) root))
+          (setq-local hara--connection connection)
+          (unless hara-connected-mode
+            (hara-connected-mode 1)))))))
 
 (defun hara--test-command (&optional file)
   "Build the native Hara project test command, optionally focused on FILE."
@@ -537,38 +617,46 @@ run that test file."
   (interactive)
   (recompile))
 
-(defun hara--auto-jack-in ()
-  (setq hara--auto-jack-in-timer nil)
-  (when (and hara-auto-jack-in-projects
-             (derived-mode-p 'hara-mode)
-             (not (and hara--connection
-                       (process-live-p
-                        (hara-connection-process hara--connection))))
-             (hara--project-file-root))
-    (condition-case error
-        (hara-jack-in)
-      (error
-       (display-warning
-        'hara
-        (format "Automatic Hara jack-in failed: %s"
-                (error-message-string error))
-        :warning)))))
+(defun hara--auto-jack-in (&optional root)
+  "Start the RESP service once for project ROOT without blocking Emacs."
+  (let ((root (or root (hara--project-file-root))))
+    (when (and hara-auto-jack-in-projects root)
+      (hara--set-project-state root :resp :starting)
+      (hara--discover-connection-async
+       root
+       (lambda (connection error)
+         (if connection
+             (progn
+               (puthash root connection hara--connections)
+               (hara--write-cache connection)
+               (hara--set-project-state root :resp :ready)
+               (hara--attach-connection-to-project connection)
+               (message "Hara connected to project %s"
+                        (file-name-nondirectory
+                         (directory-file-name root))))
+           (hara--set-project-state root :resp nil)
+           (display-warning
+            'hara
+            (format "Automatic Hara jack-in failed: %s"
+                    (or (and (stringp error) error)
+                        (and error (error-message-string error))
+                        "unknown Hara connection error"))
+            :warning)))))))
 
 (defun hara--schedule-auto-jack-in ()
-  (when (and hara-auto-jack-in-projects
-             (hara--project-file-root)
-             (not (and hara--connection
-                       (process-live-p
-                        (hara-connection-process hara--connection))))
-             (not (timerp hara--auto-jack-in-timer)))
-    (let ((buffer (current-buffer)))
-      (setq hara--auto-jack-in-timer
-            (run-at-time
-             0 nil
-             (lambda ()
-               (when (buffer-live-p buffer)
-                 (with-current-buffer buffer
-                   (hara--auto-jack-in)))))))))
+  "Schedule one asynchronous RESP startup for the current project."
+  (when-let ((root (hara--project-file-root)))
+    (when hara-auto-jack-in-projects
+      (when-let ((connection (gethash root hara--connections)))
+        (when (process-live-p (hara-connection-process connection))
+          (hara--attach-connection-to-project connection)
+          (hara--set-project-state root :resp :ready))
+        (unless (process-live-p (hara-connection-process connection))
+          (remhash root hara--connections)
+          (hara--set-project-state root :resp nil)))
+      (unless (plist-get (hara--project-state root) :resp)
+        (hara--set-project-state root :resp :scheduled)
+        (run-at-time 0 nil (lambda () (hara--auto-jack-in root)))))))
 
 (defun hara--cache-file (root)
   (expand-file-name
@@ -603,14 +691,17 @@ run that test file."
   (let ((file (hara--cache-file root)))
     (when (file-exists-p file) (delete-file file))))
 
-(defun hara--open-endpoint (root host port &optional expected-instance server-process)
+(defun hara--make-endpoint-connection
+    (root host port &optional server-process nowait)
+  "Create a RESP connection object for ROOT, HOST, and PORT."
   (let* ((network
           (make-network-process
            :name (format "hara-%s:%d" host port)
            :host host :service port :family 'ipv4
            :coding 'binary :noquery t
            :filter #'hara--process-filter
-           :sentinel #'hara--process-sentinel))
+           :sentinel #'hara--process-sentinel
+           :nowait nowait))
          (connection
           (hara--make-connection
            :root root :host host :port port :process network
@@ -618,34 +709,61 @@ run that test file."
            :counter 0 :session "ROOT" :refs 0
            :doc-cache (make-hash-table :test #'equal))))
     (process-put network 'hara-connection connection)
+    connection))
+
+(defun hara--open-endpoint (root host port &optional expected-instance server-process)
+  (let* ((connection (hara--make-endpoint-connection
+                      root host port server-process))
+         (network (hara-connection-process connection)))
     (hara--send-value network '("HELLO" "4" "CLIENT" "EMACS"))
     (let ((deadline (+ (float-time) hara-connect-timeout)))
       (while (and (not (process-get network 'hara-hello))
                   (process-live-p network)
                   (< (float-time) deadline))
         (accept-process-output network 0.05)))
-    (let* ((hello (process-get network 'hara-hello))
-           (metadata (and (listp hello) (hara--flat-response-alist hello)))
-           (server (cdr (assoc "SERVER" metadata)))
-           (protocol (hara--protocol-version metadata))
-           (instance (cdr (assoc "INSTANCE" metadata)))
-           (server-project (cdr (assoc "PROJECT" metadata))))
-      (unless (and (equal server "HARA") (equal protocol 4))
-        (delete-process network)
-        (error "Endpoint %s:%d is not a Hara protocol-4 server" host port))
-      (when (and expected-instance (not (equal expected-instance instance)))
-        (delete-process network)
-        (error "Cached Hara endpoint has been replaced"))
-      (when (and server-project
-                 (not (equal
-                       (file-name-as-directory (file-truename server-project))
-                       root)))
-        (delete-process network)
-        (error "Hara endpoint belongs to %s" server-project))
-      (setf (hara-connection-instance connection) instance
-            (hara-connection-project connection) server-project)
-      (process-put network 'hara-negotiated t)
-      connection)))
+    (condition-case error
+        (hara--accept-endpoint-hello
+         connection (process-get network 'hara-hello) expected-instance)
+      (error
+       (delete-process network)
+       (signal (car error) (cdr error))))))
+
+(defun hara--open-endpoint-async
+    (root host port callback &optional expected-instance server-process)
+  "Open a RESP endpoint and invoke CALLBACK when HELLO completes.
+CALLBACK receives CONNECTION and ERROR.  No endpoint wait is performed on
+the Emacs command loop."
+  (let* ((connection (hara--make-endpoint-connection
+                      root host port server-process t))
+         (network (hara-connection-process connection)))
+    (process-put
+     network 'hara-open-callback
+     (lambda (process hello error)
+       (if error
+           (funcall callback nil error)
+         (condition-case open-error
+             (progn
+               (hara--accept-endpoint-hello
+                connection hello expected-instance)
+               (funcall callback connection nil))
+           (error
+            (when (process-live-p process)
+              (delete-process process))
+            (funcall callback nil open-error))))))
+    (process-put
+     network 'hara-open-timer
+     (run-at-time
+      hara-connect-timeout nil
+      (lambda ()
+        (when-let ((open-callback (process-get network 'hara-open-callback)))
+          (process-put network 'hara-open-callback nil)
+          (when (process-live-p network)
+            (delete-process network))
+          (funcall open-callback
+                   network nil
+                   (format "Hara endpoint %s:%d did not answer HELLO"
+                           host port))))))
+    connection))
 
 (defun hara--try-endpoint (root host port &optional instance)
   (condition-case nil
@@ -662,9 +780,45 @@ run that test file."
         (goto-char (point-min))
         (when (re-search-forward
                "HARA RESP \\([^:\n]+\\):\\([0-9]+\\)" nil t)
-          (process-put server 'hara-endpoint
-                       (cons (match-string 1)
-                             (string-to-number (match-string 2)))))))))
+          (let ((endpoint (cons (match-string 1)
+                                (string-to-number (match-string 2)))))
+            (process-put server 'hara-endpoint endpoint)
+            (when-let ((callback (process-get server 'hara-endpoint-callback)))
+              (process-put server 'hara-endpoint-callback nil)
+              (hara--cancel-process-timer server 'hara-server-start-timer)
+              (funcall callback server endpoint nil))))))))
+
+(defun hara--server-process-sentinel (process event)
+  "Report an asynchronous Hara server startup failure."
+  (unless (process-live-p process)
+    (when-let ((callback (process-get process 'hara-endpoint-callback)))
+      (process-put process 'hara-endpoint-callback nil)
+      (hara--cancel-process-timer process 'hara-server-start-timer)
+      (funcall callback process nil (string-trim event)))))
+
+(defun hara--accept-endpoint-hello (connection hello expected-instance)
+  "Validate HELLO and mark CONNECTION as negotiated."
+  (let* ((metadata (and (listp hello) (hara--flat-response-alist hello)))
+         (server (cdr (assoc "SERVER" metadata)))
+         (protocol (hara--protocol-version metadata))
+         (instance (cdr (assoc "INSTANCE" metadata)))
+         (server-project (cdr (assoc "PROJECT" metadata)))
+         (root (hara-connection-root connection)))
+    (unless (and (equal server "HARA") (equal protocol 4))
+      (error "Endpoint %s:%d is not a Hara protocol-4 server"
+             (hara-connection-host connection)
+             (hara-connection-port connection)))
+    (when (and expected-instance (not (equal expected-instance instance)))
+      (error "Cached Hara endpoint has been replaced"))
+    (when (and server-project
+               (not (equal
+                     (file-name-as-directory (file-truename server-project))
+                     root)))
+      (error "Hara endpoint belongs to %s" server-project))
+    (setf (hara-connection-instance connection) instance
+          (hara-connection-project connection) server-project)
+    (process-put (hara-connection-process connection) 'hara-negotiated t)
+    connection))
 
 (defun hara--start-server (root)
   (let* ((buffer (get-buffer-create
@@ -701,6 +855,59 @@ run that test file."
        (when (process-live-p process) (delete-process process))
        (signal (car error) (cdr error))))))
 
+(defun hara--start-server-async (root callback)
+  "Start ROOT's Hara server and invoke CALLBACK without blocking Emacs."
+  (let* ((buffer (get-buffer-create
+                  (format " *hara-server %s*" (file-name-nondirectory
+                                                (directory-file-name root)))))
+         (_ (with-current-buffer buffer (erase-buffer)))
+         (default-directory root)
+         (command (hara--resolve-command))
+         (process
+          (make-process
+           :name (format "hara-server-%s"
+                         (substring (secure-hash 'sha1 root) 0 8))
+           :buffer buffer
+           :command (list command "--project" root "--root" root
+                          "--host" "127.0.0.1"
+                          "--port" "0" "headless")
+           :filter #'hara--server-process-filter
+           :sentinel #'hara--server-process-sentinel
+           :coding 'utf-8 :noquery t
+           :connection-type 'pipe)))
+    (process-put
+     process 'hara-endpoint-callback
+     (lambda (server endpoint error)
+       (if error
+           (funcall callback nil error)
+         (hara--open-endpoint-async
+          root (car endpoint) (cdr endpoint)
+          (lambda (connection open-error)
+            (if connection
+                (funcall callback connection nil)
+              (when (process-live-p server)
+                (delete-process server))
+              (funcall callback nil open-error)))
+          nil server))))
+    (process-put
+     process 'hara-server-start-timer
+     (run-at-time
+      hara-server-start-timeout nil
+      (lambda ()
+        (when-let ((endpoint-callback
+                    (process-get process 'hara-endpoint-callback)))
+          (process-put process 'hara-endpoint-callback nil)
+          (hara--cancel-process-timer process 'hara-server-start-timer)
+          (when (process-live-p process)
+            (delete-process process))
+          (funcall endpoint-callback
+                   process nil
+                   (format "Hara server did not publish an endpoint; see %s"
+                           (buffer-name buffer)))))))
+    (message "Starting Hara server for project %s: %s"
+             (file-name-nondirectory (directory-file-name root)) command)
+    process))
+
 (defun hara--discover-connection (root)
   (let ((existing (gethash root hara--connections)))
     (unless (and existing
@@ -726,14 +933,58 @@ run that test file."
         (hara--write-cache connection)
         connection))))
 
+(defun hara--try-endpoint-async (root host port callback &optional instance)
+  "Try an endpoint and invoke CALLBACK with CONNECTION and ERROR."
+  (if (and host port)
+      (condition-case error
+          (hara--open-endpoint-async
+           root host port
+           (lambda (connection open-error)
+             (if connection
+                 (funcall callback connection nil)
+               (funcall callback nil open-error)))
+           instance)
+        (error (funcall callback nil error)))
+    (funcall callback nil nil)))
+
+(defun hara--discover-connection-async (root callback)
+  "Discover ROOT's RESP endpoint without blocking the Emacs command loop."
+  (let ((existing (gethash root hara--connections)))
+    (if (and existing
+             (process-live-p (hara-connection-process existing)))
+        (funcall callback existing nil)
+      (when existing (remhash root hara--connections))
+      (let ((cache (hara--read-cache root)))
+        (hara--try-endpoint-async
+         root
+         (and cache (plist-get cache :host))
+         (and cache (plist-get cache :port))
+         (lambda (connection error)
+           (if connection
+               (funcall callback connection nil)
+             (hara--try-endpoint-async
+              root hara-host hara-port
+              (lambda (configured configured-error)
+                (if configured
+                    (funcall callback configured nil)
+                  (if hara-auto-start
+                      (condition-case start-error
+                          (hara--start-server-async root callback)
+                        (error (funcall callback nil start-error)))
+                    (funcall callback nil
+                             (or configured-error error
+                                 (format "No Hara server found for %s" root))))))
+              (and cache (plist-get cache :instance)))))
+         (and cache (plist-get cache :instance)))))))
+
 ;;;###autoload
 (defun hara-connect ()
   "Connect the current buffer to its project Hara server."
   (interactive)
   (let* ((root (hara--project-root))
          (connection (hara--discover-connection root)))
-    (setq-local hara--connection connection)
-    (hara-connected-mode 1)
+    (hara--set-project-state root :resp :ready)
+    (hara--attach-connection-to-project connection)
     (message "Hara connected to %s:%d [%s]"
              (hara-connection-host connection)
              (hara-connection-port connection)
@@ -752,8 +1003,10 @@ run that test file."
     (delete-process (hara-connection-process connection)))
   (when-let ((server (hara-connection-server-process connection)))
     (when (process-live-p server) (delete-process server)))
-  (hara--delete-cache (hara-connection-root connection))
-  (remhash (hara-connection-root connection) hara--connections))
+  (let ((root (hara-connection-root connection)))
+    (hara--delete-cache root)
+    (remhash root hara--connections)
+    (hara--set-project-state root :resp nil)))
 
 (defun hara--detach-connection (connection)
   "Detach CONNECTION from every Hara source and REPL buffer."
@@ -1698,15 +1951,20 @@ so a partial name is never evaluated."
 (defun hara-lsp-start ()
   "Start or arrange the Hara Eglot server for the current buffer."
   (interactive)
+  (unless (hara--project-file-root)
+    (user-error "No project.edn found above the current file"))
   (unless (hara--eglot-available-p)
     (user-error "Cannot find Hara LSP command: %s" (car hara-lsp-command)))
   (hara--eglot-register)
+  (hara--set-project-state (hara--project-file-root) :lsp :starting)
   (eglot-ensure)
   (message "Hara language server start scheduled"))
 
 (defun hara-lsp-restart ()
   "Restart the Eglot Hara language server."
   (interactive)
+  (when-let ((root (hara--project-file-root)))
+    (hara--set-project-state root :lsp :starting))
   (if-let ((server (and (fboundp 'eglot-current-server)
                         (eglot-current-server))))
       (eglot-reconnect server)
@@ -1717,8 +1975,50 @@ so a partial name is never evaluated."
   (interactive)
   (if-let ((server (and (fboundp 'eglot-current-server)
                         (eglot-current-server))))
-      (eglot-shutdown server)
+      (progn
+        (eglot-shutdown server)
+        (when-let ((root (hara--project-file-root)))
+          (hara--set-project-state root :lsp nil)))
     (message "No Hara language server is running")))
+
+(defun hara-lsp-diagnose-buffer ()
+  "Analyze the current buffer and publish its Hara diagnostics."
+  (interactive)
+  (unless buffer-file-name
+    (user-error "Current buffer has no file"))
+  (unless (hara--eglot-managed-p)
+    (user-error "Current buffer is not managed by the Hara language server"))
+  (let* ((server (eglot-current-server))
+         (file (expand-file-name buffer-file-name))
+         (uri (eglot--path-to-uri (expand-file-name buffer-file-name)))
+         (source (buffer-substring-no-properties (point-min) (point-max)))
+         (version (if (bound-and-true-p eglot--versioned-identifier)
+                      eglot--versioned-identifier
+                    0)))
+    (condition-case error
+        (progn
+          (jsonrpc-async-request
+           server :hara/diagnostics
+           (list :uri uri :text source :version version)
+           :timeout 30
+           :success-fn (lambda (_result)
+                         (message "Hara diagnostics updated for %s"
+                                  (file-name-nondirectory file)))
+           :error-fn (lambda (request-error)
+                       (display-warning
+                        'hara
+                        (format "Hara diagnostics failed: %s"
+                                request-error)
+                        :warning))
+           :timeout-fn (lambda ()
+                         (display-warning
+                          'hara
+                          "Hara diagnostics timed out"
+                          :warning)))
+          (message "Hara diagnostics requested"))
+      (error
+       (user-error "Unable to request Hara diagnostics: %s"
+                   (error-message-string error))))))
 
 (defun hara-lsp-format-buffer ()
   "Format the current buffer through the Hara language server."
@@ -1895,6 +2195,7 @@ so a partial name is never evaluated."
     (define-key map (kbd "r") #'hara-lsp-restart)
     (define-key map (kbd "x") #'hara-lsp-stop)
     (define-key map (kbd "f") #'hara-lsp-format-buffer)
+    (define-key map (kbd "D") #'hara-lsp-diagnose-buffer)
     (define-key map (kbd "d") #'xref-find-definitions)
     (define-key map (kbd "R") #'hara-lsp-find-references)
     (define-key map (kbd "n") #'hara-rename-symbol)
@@ -1935,6 +2236,7 @@ so a partial name is never evaluated."
     ["Jack in" hara-jack-in t]
     ["Start language server" hara-lsp-start t]
     ["Restart language server" hara-lsp-restart t]
+    ["Diagnose buffer" hara-lsp-diagnose-buffer t]
     ["Format buffer" hara-lsp-format-buffer t]
     ["Interrupt evaluation" hara-interrupt t]
     ["REPL" hara-repl t]))
@@ -1948,6 +2250,13 @@ so a partial name is never evaluated."
   (setq-local comment-end "")
   (setq-local indent-line-function #'lisp-indent-line)
   (setq-local imenu-generic-expression hara-imenu-generic-expression)
+  ;; Treemacs obtains file tags through Imenu.  Eglot's Imenu provider makes
+  ;; a synchronous textDocument/documentSymbol request, which would run the
+  ;; full Hara analyzer while the user is navigating the tree.  Keep Hara's
+  ;; local structural index for this buffer and leave semantic requests
+  ;; available through Eglot's explicit commands.
+  (setq-local eglot-stay-out-of
+              (cons 'imenu (cl-remove 'imenu eglot-stay-out-of)))
   (add-hook 'completion-at-point-functions #'hara-completion-at-point nil t)
   (add-hook 'eldoc-documentation-functions #'hara-eldoc-function nil t)
   (add-hook 'xref-backend-functions #'hara--xref-backend nil t)

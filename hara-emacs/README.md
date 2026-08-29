@@ -1,8 +1,9 @@
 # Hara for Emacs
 
 `hara-mode.el` provides Hara editing, protocol-4 evaluation, inline results, ElDoc, asynchronous
-Eglot completion/diagnostics, Xref navigation, Imenu, sessions, project-aware server startup, and
-a REPL. Its core uses built-in Emacs APIs; the optional documentation popup uses `eldoc-box`.
+Eglot completion, manual diagnostics, Xref navigation, Imenu, sessions, project-aware server
+startup, and a REPL. Its core uses built-in Emacs APIs; the optional documentation popup uses
+`eldoc-box`.
 
 `hara-manage.el` adds native Foundation-compatible `code.manage` previews, writes, and navigable findings.
 
@@ -63,10 +64,20 @@ cd /path/to/hara-extensions/hara-lsp
 make install
 ```
 
-When `hara-lsp` is available, opening a project `.hal` file schedules Eglot.
-Diagnostics are shown through Flymake and completion is asynchronous through
-Eglot. Definitions, hover, references, rename, and formatting use the same
-service, so the RESP connection remains available for evaluation and the REPL.
+When `hara-lsp` is available, the first `.hal` buffer beneath a `project.edn`
+schedules one Eglot language service for that project; later Hara buffers attach
+to the same service. Eglot synchronizes text and versions on open/edit, but the
+service does not analyze on every change. Completion is deliberately
+cache-only while typing: it returns static forms and definitions from an
+analysis already available for the current version, so Company cannot start a
+whole-file analysis on every keystroke. Definitions, hover, references,
+rename, and formatting remain available through Eglot. Run
+`M-x hara-lsp-diagnose-buffer` (or `C-c C-l D`) when you want diagnostics;
+results are published through Flymake. The RESP connection is also discovered
+or started once per project, asynchronously, so visiting a file does not wait
+for endpoint discovery or runtime startup.
+Hara keeps Imenu local so Treemacs file navigation does not make a synchronous
+semantic request; use Eglot commands when semantic results are needed.
 Set `hara-lsp-command` or `hara-lsp-service-project` to override discovery.
 
 Open a `.hal` file and run `M-x hara-jack-in` or press `C-c C-j`. The client first reuses a
@@ -79,16 +90,17 @@ synchronises the complete `ns`/`ns+` form when moving between namespaces.
 Every project has its own REPL buffer, preventing a multi-project workspace from
 sending input to the wrong runtime.
 
-By default, opening a local `.hal` file beneath a directory containing `project.edn` schedules
-`hara-jack-in` automatically. Standalone and remote files remain disconnected. Customize
-`hara-auto-jack-in-projects` to disable this behavior.
+By default, opening the first local `.hal` file beneath a directory containing
+`project.edn` schedules automatic RESP jack-in for that project. Additional
+buffers reuse the project connection; standalone and remote files remain
+disconnected. Customize `hara-auto-jack-in-projects` to disable this behavior.
 
 The `hara` launcher executes the prebuilt `core/java/target/hara-truffle.jar`; it never invokes Maven during
 jack-in. Build or refresh that executable fat JAR explicitly with
 `mvn -f core/java/pom.xml -Ptruffle -DskipTests package`. Override its location with `HARA_RUNTIME_JAR` when using an
-installed artifact. New-server endpoint publication may wait up to `hara-server-start-timeout`
-(15 seconds by default), while normal endpoint negotiation retains the shorter
-`hara-connect-timeout`.
+installed artifact. Explicit jack-in endpoint publication may wait up to
+`hara-server-start-timeout` (15 seconds by default), while automatic discovery
+uses nonblocking endpoint negotiation bounded by `hara-connect-timeout`.
 
 Common commands:
 
@@ -106,6 +118,7 @@ Common commands:
 - `C-c C-m`: open the `code.manage` prefix (`s`/`i`/`p`/`n`/`d`/`m`)
 - `C-c C-l s`: start the Hara language server
 - `C-c C-l r`: restart it; `C-c C-l x`: stop it
+- `C-c C-l D`: request diagnostics for the buffer
 - `C-c C-l f`: format the buffer; `C-c C-l R`: find references
 - `C-c C-n`: rename the symbol at point
 - `M-.`: jump to a source-backed definition with Xref
@@ -115,8 +128,8 @@ Common commands:
 
 The intended inner loop is deliberately close to Foundation Base and CIDER:
 
-1. Open a `.hal` file. Project files jack in automatically; `C-c C-j` does it
-   explicitly.
+1. Open a `.hal` file. Project services start in the background; `C-c C-j`
+   performs an explicit synchronous jack-in when needed.
 2. Run `C-c C-k` once to load the buffer and its namespace.
 3. Edit a definition and use `C-c C-c`, or evaluate a smaller expression with
    `C-c C-e`.

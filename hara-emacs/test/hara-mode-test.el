@@ -99,6 +99,24 @@
       (should (equal (funcall (cdr entry)) hara-lsp-command))
       (should (equal (funcall (cdr entry) nil) hara-lsp-command)))))
 
+(ert-deftest hara-eglot-contact-includes-the-canonical-project-root ()
+  (let* ((root (make-temp-file "hara-eglot-project-" t))
+         (source (expand-file-name "src/sample.hal" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (with-temp-file (expand-file-name "project.edn" root)
+            (insert "{}"))
+          (with-temp-buffer
+            (setq-local buffer-file-name source)
+            (let ((hara-lsp-command '("hara-lsp" "--stdio")))
+              (should (equal (hara--eglot-contact)
+                             (list "hara-lsp" "--stdio"
+                                   "--root"
+                                   (file-name-as-directory
+                                    (file-truename root))))))))
+      (delete-directory root t))))
+
 (ert-deftest hara-protocol-version-accepts-truffle-and-rust-metadata ()
   (should (= 4 (hara--protocol-version '(("PROTO" . 4)))))
   (should (= 4 (hara--protocol-version '(("PROTOCOL" . "4"))))))
@@ -137,6 +155,32 @@
                          '("127.0.0.1" . 4567))))
       (delete-process process)
       (kill-buffer buffer))))
+
+(ert-deftest hara-async-endpoint-uses-a-nonblocking-connect ()
+  (let (arguments)
+    (cl-letf (((symbol-function 'make-network-process)
+               (lambda (&rest values)
+                 (setq arguments values)
+                 'fake-network))
+              ((symbol-function 'process-put) #'ignore))
+      (hara--make-endpoint-connection
+       "/tmp/hara-project/" "127.0.0.1" 1311 nil t))
+    (should (eq (plist-get arguments :nowait) t))))
+
+(ert-deftest hara-async-endpoint-sends-hello-after-connect ()
+  (let (sent)
+    (cl-letf (((symbol-function 'process-get)
+               (lambda (_process property)
+                 (and (eq property 'hara-open-callback)
+                      (lambda (&rest _)
+                        (ert-fail "the open callback must wait for HELLO")))))
+              ((symbol-function 'process-put) #'ignore)
+              ((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'hara--send-value)
+               (lambda (process value)
+                 (setq sent (list process value)))))
+      (hara--process-sentinel 'fake-network "open\n"))
+    (should (equal sent '(fake-network ("HELLO" "4" "CLIENT" "EMACS"))))))
 
 (ert-deftest hara-project-and-cache-are-keyed-by-canonical-root ()
   (let* ((root (make-temp-file "hara-project-" t))
@@ -186,35 +230,76 @@
          (standalone-root (make-temp-file "hara-standalone-" t))
          (source-directory (expand-file-name "src" root))
          (source-file (expand-file-name "sample.hal" source-directory))
-         jack-in-called)
+         scheduled
+         auto-started)
     (unwind-protect
         (progn
           (make-directory source-directory)
           (with-temp-file (expand-file-name "project.edn" root)
             (insert "{:hara/type :project :project/id auto}"))
+          (clrhash hara--project-autostart-state)
           (with-temp-buffer
             (setq-local buffer-file-name source-file)
             (cl-letf (((symbol-function 'run-at-time)
                        (lambda (_seconds _repeat function &rest arguments)
-                         (apply function arguments)
+                         (setq scheduled (cons function arguments))
                          'fake-timer))
-                      ((symbol-function 'hara-jack-in)
-                       (lambda () (setq jack-in-called t))))
+                      ((symbol-function 'hara--maybe-start-eglot) #'ignore))
               (hara-mode)
-              (should jack-in-called)
+              (should scheduled)
+              (should-not auto-started)
               (should (equal (hara--project-file-root)
-                             (file-name-as-directory (file-truename root))))))
-          (setq jack-in-called nil)
+                             (file-name-as-directory (file-truename root)))))
+          (cl-letf (((symbol-function 'hara--auto-jack-in)
+                     (lambda (project-root)
+                       (setq auto-started project-root))))
+            (apply (car scheduled) (cdr scheduled)))
+          (should (equal auto-started
+                         (file-name-as-directory (file-truename root))))
+          (setq scheduled nil)
+          (with-temp-buffer
+            (setq-local buffer-file-name source-file)
+            (cl-letf (((symbol-function 'run-at-time)
+                       (lambda (&rest _)
+                         (ert-fail "the project must only schedule startup once")))
+                      ((symbol-function 'hara--maybe-start-eglot) #'ignore))
+              (hara-mode)))
+          (should-not scheduled)
           (with-temp-buffer
             (setq-local buffer-file-name
                         (expand-file-name "standalone.hal"
                                           standalone-root))
-            (cl-letf (((symbol-function 'hara-jack-in)
-                       (lambda () (setq jack-in-called t))))
+            (cl-letf (((symbol-function 'run-at-time)
+                       (lambda (&rest _)
+                         (ert-fail "standalone files must not schedule startup")))
+                      ((symbol-function 'hara--maybe-start-eglot) #'ignore))
               (hara-mode)
-              (should-not jack-in-called))))
+              (should-not (hara--project-file-root)))))
       (delete-directory root t)
-      (delete-directory standalone-root t))))
+      (delete-directory standalone-root t)
+      (clrhash hara--project-autostart-state)))))
+
+(ert-deftest hara-lsp-diagnose-buffer-sends-current-unsaved-source ()
+  (with-temp-buffer
+    (setq-local buffer-file-name "/tmp/hara-diagnose/sample.hal")
+    (setq-local eglot--versioned-identifier 7)
+    (insert "(ns sample.core)\n(def answer missing)")
+    (let (request)
+      (cl-letf (((symbol-function 'hara--eglot-managed-p) (lambda () t))
+                ((symbol-function 'eglot-current-server) (lambda () 'server))
+                ((symbol-function 'eglot--path-to-uri)
+                 (lambda (path) (concat "file://" path)))
+                ((symbol-function 'jsonrpc-async-request)
+                 (lambda (server method params &rest options)
+                   (setq request (list server method params options)))))
+        (hara-lsp-diagnose-buffer))
+      (should (equal (nth 0 request) 'server))
+      (should (eq (nth 1 request) :hara/diagnostics))
+      (should (equal (nth 2 request)
+                     '(:uri "file:///tmp/hara-diagnose/sample.hal"
+                       :text "(ns sample.core)\n(def answer missing)"
+                       :version 7)))
+      (should (equal (plist-get (nth 3 request) :timeout) 30)))))
 
 (ert-deftest hara-project-discovery-ignores-project-hal ()
   (let* ((root (make-temp-file "hara-project-hal-" t))
@@ -311,6 +396,7 @@
     (should (member #'hara-completion-at-point completion-at-point-functions))
     (should (member #'hara-eldoc-function eldoc-documentation-functions))
     (should (member #'hara--xref-backend xref-backend-functions))
+    (should (member 'imenu eglot-stay-out-of))
     (insert "(defn answer []\n  42) ; comment")
     (font-lock-ensure)
     (should (eq (get-text-property 2 'face) 'font-lock-keyword-face))))

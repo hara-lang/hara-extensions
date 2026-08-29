@@ -21,8 +21,8 @@
     [(:qualified definition)
      (:start-offset (:props (:block definition)))
      (:end-offset (:props (:block definition)))
-     (:message finding)]
-    => ['demo/answer 2 7 "unresolved symbol: missing"]))
+     (:message finding)])
+  => ['demo/answer 16 22 "unresolved symbol: missing"])
 
 ^{:refer hara.lsp.service/diagnostics-for}
 (fact "diagnostics use the unresolved token's real source range"
@@ -32,8 +32,112 @@
     [(get diagnostic "message")
      (get (get range "start") "line")
      (get (get range "start") "character")
-     (get (get range "end") "character")]
-    => ["unresolved symbol: missing" 1 16 23]))
+     (get (get range "end") "character")])
+  => ["unresolved symbol: missing" 1 16 23])
+
+^{:refer hara.lsp.service/store-document!}
+(fact "document storage records text and version without doing analysis"
+  (service/reset!)
+  (let [entry (service/store-document!
+               "file:///sample.hal"
+               "(ns sample.core)"
+               4)]
+    [(:text entry)
+     (:version entry)
+     (:analysis entry)
+     (:analysis-version entry)
+     (:text (service/document-entry "file:///sample.hal"))])
+  => ["(ns sample.core)" 4 nil nil "(ns sample.core)"])
+
+^{:refer hara.lsp.service/analyzed-entry?}
+(fact "analyzed-entry? follows the stored document version"
+  (service/reset!)
+  (service/store-document!
+   "file:///sample.hal"
+   "(ns sample.core)\n(defn answer [] 42)"
+   1)
+  (let [entry (service/document-entry "file:///sample.hal")
+        analyzed (service/analyzed-entry entry)]
+    [(service/analyzed-entry? entry)
+     (service/analyzed-entry? analyzed)
+     (:analysis-version analyzed)])
+  => [false true 1])
+
+^{:refer hara.lsp.service/analyzed-entry}
+(fact "analyzed-entry caches analysis for the document version"
+  (service/reset!)
+  (service/store-document!
+   "file:///sample.hal"
+   "(ns sample.core)\n(defn answer [] 42)"
+   1)
+  (let [first (service/analyzed-entry (service/document-entry "file:///sample.hal"))
+        second (service/analyzed-entry (service/document-entry "file:///sample.hal"))]
+    [(service/analyzed-entry? first)
+     (service/analyzed-entry? second)
+     (= (:analysis first) (:analysis second))
+     (:analysis-version second)])
+  => [true true true 1])
+
+^{:refer hara.lsp.service/store-analysis!}
+(fact "store-analysis! updates only the matching open document"
+  (service/reset!)
+  (service/store-document! "file:///sample.hal" "(ns sample.core)" 2)
+  (let [analysis {:findings [] :definitions []}]
+    [(service/store-analysis! "file:///sample.hal" 2 analysis)
+     (:analysis (service/document-entry "file:///sample.hal"))
+     (:analysis-version (service/document-entry "file:///sample.hal"))])
+  => [{:findings [] :definitions []} {:findings [] :definitions []} 2])
+
+^{:refer hara.lsp.service/diagnostics-for-analysis}
+(fact "diagnostics-for-analysis reuses an already computed analysis"
+  (let [source "(ns demo)\n(defn answer [] missing)"
+        analysis (service/safe-analysis source)
+        diagnostic (first (service/diagnostics-for-analysis source analysis))]
+    [(get diagnostic "message")
+     (get (get diagnostic "range") "start")])
+  => ["unresolved symbol: missing" {"line" 1 "character" 16}])
+
+^{:refer hara.lsp.service/diagnostics-notification}
+(fact "diagnostics-notification builds the publish envelope"
+  (let [source "(ns demo)\n(defn answer [] missing)"
+        notification (service/diagnostics-notification
+                      "file:///sample.hal"
+                      source
+                      (service/safe-analysis source))]
+    [(get notification "method")
+     (get (get notification "params") "uri")
+     (get (get notification "params") "diagnostics")])
+  => ["textDocument/publishDiagnostics"
+      "file:///sample.hal"
+      [{"range" {"start" {"line" 1 "character" 16}
+                  "end" {"line" 1 "character" 23}}
+        "severity" 1
+        "source" "hara"
+        "message" "unresolved symbol: missing"}]])
+
+^{:refer hara.lsp.service/clear-diagnostics-notification}
+(fact "clear-diagnostics-notification does no analysis"
+  (let [notification (service/clear-diagnostics-notification "file:///sample.hal")]
+    [(get notification "method")
+     (get (get notification "params") "uri")
+     (get (get notification "params") "diagnostics")])
+  => ["textDocument/publishDiagnostics" "file:///sample.hal" []])
+
+^{:refer hara.lsp.service/diagnose-document}
+(fact "diagnose-document analyzes the requested source and caches its version"
+  (service/reset!)
+  (let [source "(ns demo)\n(defn answer [] missing)"
+        notification (service/diagnose-document
+                      {"uri" "file:///sample.hal"
+                       "text" source
+                       "version" 9})
+        entry (service/document-entry "file:///sample.hal")
+        diagnostic (first (get (get notification "params") "diagnostics"))]
+    [(:version entry)
+     (:analysis-version entry)
+     (service/analyzed-entry? entry)
+     (get diagnostic "message")])
+  => [9 9 true "unresolved symbol: missing"])
 
 ^{:refer hara.lsp.service/completion-allowed?}
 (fact "host implementation namespaces are excluded from completion"
@@ -41,6 +145,126 @@
    (service/completion-allowed? "std.native.Coroutine")
    (service/completion-allowed? "std.foundation/resolve")]
   => [false false true])
+
+^{:refer hara.lsp.service/completion-result}
+(fact "completion does not analyze an edited document"
+  (service/reset!)
+  (service/store-document!
+   "file:///sample.hal"
+   "(ns demo)\n(defn answer [] 42)\nwh"
+   1)
+  (let [items (get (service/completion-result
+                    "file:///sample.hal"
+                    {"line" 2 "character" 3})
+                   "items")
+        entry (service/document-entry "file:///sample.hal")]
+    [(vec (map (fn [item] (get item "label")) items))
+     (service/analyzed-entry? entry)])
+  => [["when" "when-let" "when-not" "while"] false])
+
+^{:refer hara.lsp.service/completion-result}
+(fact "completion includes definitions after an explicit analysis"
+  (service/reset!)
+  (service/store-document!
+   "file:///sample.hal"
+   "(ns demo)\n(defn answer [] 42)\nans"
+   1)
+  (let [entry (service/document-entry "file:///sample.hal")
+        analysis (service/safe-analysis (:text entry))]
+    (service/store-analysis! "file:///sample.hal" 1 analysis)
+    (let [items (get (service/completion-result
+                      "file:///sample.hal"
+                      {"line" 2 "character" 3})
+                     "items")]
+      (vec (map (fn [item] (get item "label")) items))))
+  => ["answer"])
+
+^{:refer hara.lsp.service/definition-result}
+(fact "definition-result uses the cached analysis for the requested document"
+  (service/reset!)
+  (service/store-document!
+   "file:///sample.hal"
+   "(ns demo)\n(defn answer [] 42)\n(answer)"
+   1)
+  (let [locations (service/definition-result
+                   "file:///sample.hal"
+                   {"line" 2 "character" 3})
+        location (first locations)]
+    [(count locations)
+     (get location "uri")
+     (get (get (get location "range") "start") "line")])
+  => [1 "file:///sample.hal" 1])
+
+^{:refer hara.lsp.service/document-symbol-result}
+(fact "document-symbol-result returns analyzed definitions"
+  (service/reset!)
+  (service/store-document!
+   "file:///sample.hal"
+   "(ns demo)\n(defn answer [] 42)"
+   1)
+  (let [symbol (first (service/document-symbol-result "file:///sample.hal"))]
+    [(get symbol "name") (get symbol "kind") (get symbol "detail")])
+  => ["answer" 12 "demo/answer"])
+
+^{:refer hara.lsp.service/workspace-symbol-result}
+(fact "workspace symbols analyze each open document on demand"
+  (service/reset!)
+  (service/store-document!
+   "file:///sample.hal"
+   "(ns demo)\n(defn answer [] 42)"
+   1)
+  (let [symbol (first (service/workspace-symbol-result "demo/answer"))]
+    [(get symbol "name") (get symbol "detail")])
+  => ["answer" "demo/answer"])
+
+^{:refer hara.lsp.service/hover-result}
+(fact "hover-result reads the requested definition from on-demand analysis"
+  (service/reset!)
+  (service/store-document!
+   "file:///sample.hal"
+   "(ns demo)\n(defn answer [] 42)\n(answer)"
+   1)
+  (get (get (service/hover-result
+             "file:///sample.hal"
+             {"line" 2 "character" 3})
+            "contents")
+       "value")
+  => "**demo/answer**\n\nHara function")
+
+^{:refer hara.lsp.service/open-document}
+(fact "open-document stores text and clears stale diagnostics"
+  (service/reset!)
+  (let [source "(ns demo)\n(defn answer [] missing)"
+        notification (service/open-document
+                      {"textDocument"
+                       {"uri" "file:///sample.hal"
+                        "text" source
+                        "version" 1}})
+        entry (service/document-entry "file:///sample.hal")]
+    [(:text entry)
+     (:version entry)
+     (:analysis entry)
+     (get (get notification "params") "diagnostics")])
+  => ["(ns demo)\n(defn answer [] missing)" 1 nil []])
+
+^{:refer hara.lsp.service/change-document}
+(fact "change-document replaces text and clears stale diagnostics"
+  (service/reset!)
+  (service/open-document
+   {"textDocument" {"uri" "file:///sample.hal"
+                     "text" "(ns demo)"
+                     "version" 1}})
+  (let [source "(ns demo)\n(def answer 42)"
+        notification (service/change-document
+                      {"textDocument" {"uri" "file:///sample.hal"
+                                        "version" 2}
+                       "contentChanges" [{"text" source}]})
+        entry (service/document-entry "file:///sample.hal")]
+    [(:text entry)
+     (:version entry)
+     (:analysis entry)
+     (get (get notification "params") "diagnostics")])
+  => ["(ns demo)\n(def answer 42)" 2 nil []])
 
 ^{:refer hara.lsp.service/handle}
 (fact "the service emits an LSP-shaped JSON envelope"
@@ -52,8 +276,30 @@
         response (get output "response")]
     [(get response "id")
      (get response "jsonrpc")
-     (get (get response "result") "capabilities")
-     (get output "notifications")]
-    => [1 "2.0" true []]))
+     (get (get (get response "result") "capabilities")
+          "definitionProvider")
+     (get output "notifications")])
+  => [1 "2.0" true []])
+
+^{:refer hara.lsp.service/handle-request}
+(fact "manual diagnostics return a response and publish one notification"
+  (service/reset!)
+  (let [source "(ns demo)\n(defn answer [] missing)"
+        output (service/handle-request
+                {"jsonrpc" "2.0"
+                 "id" 7
+                 "method" "hara/diagnostics"
+                 "params" {"uri" "file:///sample.hal"
+                            "text" source
+                            "version" 3}})
+        response (get output "response")
+        notification (first (get output "notifications"))
+        diagnostic (first (get (get notification "params") "diagnostics"))]
+    [(get response "id")
+     (get (get response "result") "ok")
+     (get notification "method")
+     (get diagnostic "message")])
+  => [7 true "textDocument/publishDiagnostics"
+      "unresolved symbol: missing"])
 
 (pr-str (run {:namespace "hara.lsp.service-test"}))

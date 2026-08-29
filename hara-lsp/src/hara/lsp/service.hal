@@ -189,11 +189,42 @@
     (catch Throwable error
       {:findings [] :definitions [] :error (str error)})))
 
-(defn diagnostics-for
-  "Return LSP diagnostics for SOURCE."
-  [source]
-  (let [analysis (safe-analysis source)
-        findings (:findings analysis)
+(defn analyzed-entry?
+  "Return true when ENTRY contains an analysis for its current version."
+  [entry]
+  (and entry
+       (has? entry :analysis)
+       (has? entry :analysis-version)
+       (= (:analysis-version entry) (:version entry))))
+
+(defn store-analysis!
+  "Store ANALYSIS for URI and VERSION when the document is still present."
+  [uri version analysis]
+  (std.foundation/swap! +state+
+                         (fn [current]
+                           (if-let [entry (get-in current [:documents uri])]
+                             (assoc-in current [:documents uri]
+                                       (assoc entry
+                                              :analysis analysis
+                                              :analysis-version version))
+                             current)))
+  analysis)
+
+(defn analyzed-entry
+  "Return ENTRY with a current analysis, caching it by document version."
+  [entry]
+  (if (nil? entry)
+    nil
+    (if (analyzed-entry? entry)
+      entry
+      (let [analysis (safe-analysis (or (:text entry) ""))]
+        (store-analysis! (:uri entry) (:version entry) analysis)
+        (assoc entry :analysis analysis :analysis-version (:version entry))))))
+
+(defn diagnostics-for-analysis
+  "Build diagnostics for SOURCE from an already computed ANALYSIS."
+  [source analysis]
+  (let [findings (:findings analysis)
         diagnostics (vec (map (fn [finding] (diagnostic source finding)) findings))]
     (if-let [error (:error analysis)]
       (conj diagnostics
@@ -203,6 +234,11 @@
              "message" error})
       diagnostics)))
 
+(defn diagnostics-for
+  "Return LSP diagnostics for SOURCE."
+  [source]
+  (diagnostics-for-analysis source (safe-analysis source)))
+
 (defn document-entry
   "Return a stored document entry by URI."
   [uri]
@@ -210,20 +246,44 @@
 
 (defn diagnostics-notification
   "Build the publishDiagnostics notification for URI and SOURCE."
-  [uri source]
+  ([uri source]
+   (diagnostics-notification uri source (safe-analysis source)))
+  ([uri source analysis]
+   {"jsonrpc" "2.0"
+    "method" "textDocument/publishDiagnostics"
+    "params" {"uri" uri
+               "diagnostics" (diagnostics-for-analysis source analysis)}}))
+
+(defn clear-diagnostics-notification
+  "Build an empty diagnostic notification for URI without analyzing text."
+  [uri]
   {"jsonrpc" "2.0"
    "method" "textDocument/publishDiagnostics"
-   "params" {"uri" uri "diagnostics" (diagnostics-for source)}})
+   "params" {"uri" uri "diagnostics" []}})
 
 (defn store-document!
-  "Store URI, SOURCE, and its current analysis state."
+  "Store URI, SOURCE, and VERSION without analyzing the document."
   [uri source version]
-  (let [analysis (safe-analysis source)
-        entry {:uri uri :text source :version version :analysis analysis}]
+  (let [entry {:uri uri :text source :version version}]
     (std.foundation/swap! +state+
                            (fn [current]
                              (assoc-in current [:documents uri] entry)))
     entry))
+
+(defn diagnose-document
+  "Analyze the current document supplied by an explicit diagnostics request."
+  [params]
+  (let [uri (get params "uri")
+        source (or (get params "text") "")
+        version (get params "version")
+        existing (document-entry uri)
+        entry (if (and existing
+                       (= source (:text existing))
+                       (= version (:version existing)))
+                existing
+                (store-document! uri source version))
+        analyzed (analyzed-entry entry)]
+    (diagnostics-notification uri (:text analyzed) (:analysis analyzed))))
 
 (defn remove-document!
   "Remove URI from the open-document registry."
@@ -322,7 +382,9 @@
   {"label" label "kind" 3})
 
 (defn completion-result
-  "Return completion items for URI and position."
+  "Return completion items without starting semantic analysis.
+   Completion may use analysis already cached for the document, but typing
+   must not turn an editor completion request into a whole-document analysis."
   [uri position]
   (let [entry (document-entry uri)
         source (or (:text entry) "")
@@ -335,7 +397,7 @@
 (defn definition-result
   "Return definition locations for the token at POSITION."
   [uri position]
-  (let [entry (document-entry uri)
+  (let [entry (analyzed-entry (document-entry uri))
         source (or (:text entry) "")
         identifier (identifier-at-position source position)
         token (and identifier (get identifier "text"))]
@@ -348,7 +410,7 @@
 (defn document-symbol-result
   "Return document symbols for URI."
   [uri]
-  (let [entry (document-entry uri)
+  (let [entry (analyzed-entry (document-entry uri))
         source (or (:text entry) "")]
     (if entry
       (vec (map (fn [definition]
@@ -362,7 +424,8 @@
   (vec
    (reduce-kv
     (fn [output uri entry]
-      (let [source (:text entry)]
+      (let [entry (analyzed-entry entry)
+            source (:text entry)]
         (into output
               (map (fn [definition]
                      (definition-symbol uri source definition))
@@ -375,7 +438,7 @@
 (defn hover-result
   "Return a compact markdown hover for a known definition."
   [uri position]
-  (let [entry (document-entry uri)
+  (let [entry (analyzed-entry (document-entry uri))
         source (or (:text entry) "")
         identifier (identifier-at-position source position)
         token (and identifier (get identifier "text"))
@@ -478,16 +541,16 @@
   (get params "textDocument"))
 
 (defn open-document
-  "Handle textDocument/didOpen and return its diagnostic notification."
+  "Handle textDocument/didOpen without analyzing the document."
   [params]
   (let [document (text-document-item params)
         uri (get document "uri")
         source (get document "text")]
     (store-document! uri source (get document "version"))
-    (diagnostics-notification uri source)))
+    (clear-diagnostics-notification uri)))
 
 (defn change-document
-  "Handle textDocument/didChange and return its diagnostic notification."
+  "Handle textDocument/didChange without analyzing the document."
   [params]
   (let [document (text-document-item params)
         uri (get document "uri")
@@ -495,7 +558,7 @@
         change (first changes)
         source (get change "text")]
     (store-document! uri source (get document "version"))
-    (diagnostics-notification uri source)))
+    (clear-diagnostics-notification uri)))
 
 (defn close-document
   "Handle textDocument/didClose."
@@ -539,6 +602,9 @@
         params (or (get request "params") {})
         id (get request "id")
         notification (cond
+                       (= method "hara/diagnostics")
+                       (diagnose-document params)
+
                        (= method "textDocument/didOpen")
                        (open-document params)
 
@@ -552,6 +618,7 @@
         result (cond
                  (= method "initialize") (do (hara.lsp.service/reset!) (initialize-result))
                  (= method "shutdown") nil
+                 (= method "hara/diagnostics") {"ok" true}
                  (= method "textDocument/completion")
                  (completion-result (get (get params "textDocument") "uri")
                                     (get params "position"))
