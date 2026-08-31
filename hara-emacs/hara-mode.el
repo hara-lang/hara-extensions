@@ -67,10 +67,12 @@
            (let ((bin (expand-file-name "bin/hara" (file-name-directory load-file-name))))
              (and (file-executable-p bin) bin)))
       "hara")
-  "Hara executable used by `hara-jack-in'.
-If you customize this, hara-mode will use your value exactly. Otherwise it
-prefers the installed native lite runtime, then a package-local `bin/hara'
-launcher, and finally a `hara' executable on `exec-path'."
+  "Fallback Hara executable used by `hara-jack-in'.
+A project's top-level `:project/hara-bin' setting takes precedence, allowing
+the project to select the Hara distribution it requires.  When that setting is
+absent, hara-mode prefers the installed native lite runtime, then a
+package-local `bin/hara' launcher, and finally a `hara' executable on
+`exec-path'."
   :type 'string
   :group 'hara)
 
@@ -166,15 +168,98 @@ Eglot provides the preferred asynchronous completion path."
             (setq dir (if (equal parent dir) nil parent))))))
     found))
 
+(defun hara--edn-skip-space-and-comments ()
+  "Move point past EDN whitespace, commas, and line comments."
+  (let (comment)
+    (while (progn
+             (skip-chars-forward " \t\r\n,")
+             (setq comment (eq (char-after) ?\;))
+             (when comment
+               (forward-line 1))
+             comment))))
+
+(defun hara--edn-skip-string ()
+  "Move point past the EDN string at point, including its quotes."
+  (unless (eq (char-after) ?\")
+    (error "Expected an EDN string"))
+  (forward-char 1)
+  (let (escaped closed)
+    (while (and (not closed) (not (eobp)))
+      (let ((character (char-after)))
+        (forward-char 1)
+        (cond
+         (escaped (setq escaped nil))
+         ((eq character ?\\) (setq escaped t))
+         ((eq character ?\") (setq closed t)))))
+    (unless closed
+      (error "Unterminated EDN string"))))
+
+(defun hara--edn-read-string ()
+  "Read the EDN string at point and move point after it."
+  (let ((start (point)))
+    (hara--edn-skip-string)
+    (car (read-from-string
+          (buffer-substring-no-properties start (point))))))
+
+(defun hara--project-edn-string (root key)
+  "Return ROOT's top-level EDN string setting KEY, or nil when absent.
+Only the small `project.edn' configuration surface needed before a Hara
+runtime has started is read here; this is deliberately not a general EDN
+reader."
+  (let ((project-file (expand-file-name "project.edn" root)))
+    (when (file-readable-p project-file)
+      (with-temp-buffer
+        (insert-file-contents project-file)
+        (goto-char (point-min))
+        (let ((depth 0)
+              value)
+          (while (and (not value) (not (eobp)))
+            (hara--edn-skip-space-and-comments)
+            (unless (eobp)
+              (pcase (char-after)
+                ((or ?{ ?\[ ?\() (setq depth (1+ depth)) (forward-char 1))
+                ((or ?} ?\] ?\)) (setq depth (max 0 (1- depth))) (forward-char 1))
+                (?\" (hara--edn-skip-string))
+                (?:
+                 (let ((start (point)))
+                   (skip-chars-forward "^ \t\r\n,{}[]();\"")
+                   (when (and (= depth 1)
+                              (string= (buffer-substring-no-properties
+                                        start (point))
+                                       key))
+                     (hara--edn-skip-space-and-comments)
+                     (unless (eq (char-after) ?\")
+                       (user-error "project.edn %s must be an EDN string" key))
+                     (setq value (hara--edn-read-string)))))
+                (_ (forward-char 1)))))
+          value)))))
+
+(defun hara--project-command ()
+  "Return the executable configured by the current project's project.edn."
+  (when-let* ((root (hara--project-file-root))
+              (configured (hara--project-edn-string root ":project/hara-bin")))
+    (let* ((candidate (expand-file-name configured root))
+           (path-command (and (not (file-name-directory configured))
+                              (executable-find configured))))
+      (cond
+       ((and (file-regular-p candidate) (file-executable-p candidate))
+        (file-truename candidate))
+       (path-command path-command)
+       (t
+        (user-error "project.edn :project/hara-bin is not executable: %s"
+                    candidate))))))
+
 (defun hara--resolve-command ()
   "Return the executable to use for launching the Hara server.
 Prefer, in order:
-1. An absolute, executable `hara-command'.
-2. A `hara' script in the current project root or its ancestors.
-3. A workspace or legacy monorepo hara-emacs launcher.
-4. The package-local `bin/hara' wrapper.
-5. The raw `hara-command' value."
+1. An executable configured by `:project/hara-bin' in project.edn.
+2. An absolute, executable `hara-command'.
+3. A `hara' script in the current project root or its ancestors.
+4. A workspace or legacy monorepo hara-emacs launcher.
+5. The package-local `bin/hara' wrapper.
+6. The raw `hara-command' value."
   (cond
+   ((hara--project-command))
    ((and (file-name-absolute-p hara-command)
          (file-executable-p hara-command))
     hara-command)
@@ -1108,6 +1193,18 @@ Stop an Emacs-owned server; otherwise close only the client connection."
   (when-let ((marker (member :details (cddr error))))
     (cadr marker)))
 
+(defun hara--error-diagnostic (error)
+  "Return the protocol-4 diagnostic payload carried by ERROR, if present."
+  (let ((details (hara--error-details error)))
+    (cond
+     ((and (listp details)
+           (= (length details) 1)
+           (listp (car details))
+           (hara--error-field (car details) "VERSION"))
+      (car details))
+     ((and (listp details) (hara--error-field details "VERSION")) details)
+     (t nil))))
+
 (defun hara--error-field (value &rest keys)
   "Find the first of KEYS in a plist, alist, flat list, or hash table VALUE."
   (catch 'found
@@ -1256,13 +1353,89 @@ ordinal."
 
 (defun hara--error-runtime-location (error)
   "Return a file/line/column location embedded in structured ERROR details."
-  (let* ((details (hara--error-details error))
+  (let* ((details (or (hara--error-field (hara--error-diagnostic error) "PRIMARY")
+                      (hara--error-details error)))
          (file (hara--error-field details :file "file" "FILE" :path "path"))
          (line (hara--error-field details :line "line" "LINE" :row "row"))
          (column (hara--error-field details :column "column" "COLUMN" :col "col")))
     (when (and file line)
       (list file (if (numberp line) line (string-to-number line))
             (if (numberp column) column (string-to-number (or column "1")))))))
+
+(defun hara--error-diagnostic-frames (error)
+  "Return the structured callable frames carried by ERROR."
+  (let ((frames (hara--error-field (hara--error-diagnostic error) "FRAMES")))
+    (cond
+     ((vectorp frames) (append frames nil))
+     ((listp frames) frames)
+     (t nil))))
+
+(defun hara--error-frame-location (frame root)
+  "Resolve FRAME's protocol location to an Emacs source location."
+  (let* ((namespace (hara--error-field frame "NAMESPACE"))
+         (file (hara--error-field frame "FILE"))
+         (line (hara--error-field frame "LINE"))
+         (column (hara--error-field frame "COLUMN"))
+         (line (if (numberp line) line (string-to-number (or line "0"))))
+         (column (if (numberp column) column (string-to-number (or column "1"))))
+         (file (or (and file (hara--error-location-file file root))
+                   (and root namespace (hara--namespace-file root namespace)))))
+    (when (and file (> line 0))
+      (list file line (max 1 column)))))
+
+(defun hara--insert-error-exception (exception &optional depth)
+  "Insert EXCEPTION and its bounded cause chain into the current error buffer."
+  (let* ((depth (or depth 0))
+         (indent (make-string (* 2 depth) ? ))
+         (message (hara--error-field exception "MESSAGE"))
+         (class (hara--error-field exception "CLASS"))
+         (code (hara--error-field exception "CODE"))
+         (data (hara--error-field exception "DATA"))
+         (cause (hara--error-field exception "CAUSE")))
+    (insert (format "%s%s\n" indent (or message "Runtime exception")))
+    (when class (insert (format "%s  Class: %s\n" indent class)))
+    (when code (insert (format "%s  Code: %s\n" indent code)))
+    (when data (insert (format "%s  Data: %s\n" indent data)))
+    (when (consp cause)
+      (insert (format "%s  Caused by:\n" indent))
+      (hara--insert-error-exception cause (1+ depth)))))
+
+(defun hara--insert-error-excerpt (excerpt)
+  "Insert the protocol's primary source EXCERPT in the current error buffer."
+  (when (listp excerpt)
+    (let ((start (hara--error-field excerpt "START-LINE"))
+          (text (hara--error-field excerpt "TEXT")))
+      (when (and start text)
+        (insert "\nSource excerpt:\n")
+        (cl-loop for line in (split-string text "\n")
+                 for number from (if (numberp start)
+                                     start
+                                   (string-to-number start))
+                 do (insert (format "%6d  %s\n" number line)))))))
+
+(defun hara--insert-error-frames (frames root)
+  "Insert clickable structured FRAMES in a CIDER-style backtrace section."
+  (insert "\nBacktrace:\n")
+  (if frames
+      (cl-loop for frame in frames
+               for index from 0
+               do (let* ((function (or (hara--error-field frame "FUNCTION")
+                                       "<anonymous>"))
+                         (namespace (hara--error-field frame "NAMESPACE"))
+                         (label (if namespace
+                                    (format "%s/%s" namespace function)
+                                  function))
+                         (location (hara--error-frame-location frame root)))
+                    (insert (format "  %2d  " index))
+                    (hara--insert-error-location label location)
+                    (when location
+                      (insert (format "  %s:%d:%d"
+                                      (nth 0 location) (nth 1 location) (nth 2 location))))
+                    (insert "\n")))
+    (insert "  No structured runtime frames returned.\n")))
+
+(define-derived-mode hara-error-mode special-mode "Hara Error"
+  "Major mode for a Hara RESP evaluation backtrace.")
 
 (defun hara--error-short-message (error)
   "Return a compact first-line summary for inline error overlays."
@@ -1276,12 +1449,21 @@ ordinal."
          (buffer (get-buffer-create "*Hara Error*"))
          (contexts (hara--error-contexts error))
          (stack (hara--error-stack-lines error))
+         (diagnostic (hara--error-diagnostic error))
+         (exception (and diagnostic (hara--error-field diagnostic "EXCEPTION")))
+         (frames (hara--error-diagnostic-frames error))
+         (excerpt (and diagnostic (hara--error-field diagnostic "EXCERPT")))
          (runtime-location (hara--error-runtime-location error)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert (format "Hara %s\n\n%s\n"
-                        (car error) (cadr error)))
+                        (car error)
+                        (or (and diagnostic (hara--error-field diagnostic "MESSAGE"))
+                            (cadr error))))
+        (when (consp exception)
+          (insert "\nException:\n")
+          (hara--insert-error-exception exception))
         (when contexts
           (insert "\nSource contexts:\n")
           (dolist (context contexts)
@@ -1311,11 +1493,15 @@ ordinal."
            (list (hara--error-location-file (nth 0 runtime-location) root)
                  (nth 1 runtime-location)
                  (nth 2 runtime-location))))
-        (insert "\nHara stack (including coroutine/fiber frames):\n")
-        (if stack
-            (dolist (line stack) (insert "  " line "\n"))
-          (insert "  No runtime stack details returned.\n"))
-        (special-mode)))
+        (when diagnostic
+          (hara--insert-error-excerpt excerpt)
+          (hara--insert-error-frames frames root))
+        (unless diagnostic
+          (insert "\nHara stack (including coroutine/fiber frames):\n")
+          (if stack
+              (dolist (line stack) (insert "  " line "\n"))
+            (insert "  No runtime stack details returned.\n")))
+        (hara-error-mode)))
     (display-buffer buffer)))
 
 (defun hara--clear-result-overlay (&rest _)

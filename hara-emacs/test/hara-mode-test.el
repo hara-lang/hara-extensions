@@ -77,6 +77,47 @@
       (when (get-buffer "*Hara Error*") (kill-buffer "*Hara Error*"))
       (delete-directory root t))))
 
+(ert-deftest hara-error-buffer-renders-clickable-structured-frames ()
+  (let* ((root (make-temp-file "hara-diagnostic-project-" t))
+         (file (expand-file-name "src/sample.hal" root))
+         (diagnostic
+          `("VERSION" 1
+            "MESSAGE" "thrown: bad input"
+            "EXCEPTION" ("MESSAGE" "bad input"
+                         "CLASS" ":ex.class/argument"
+                         "CODE" ":test/failed"
+                         "DATA" "{:value 41}"
+                         "CAUSE" nil)
+            "PRIMARY" ("FILE" ,file "LINE" 3 "COLUMN" 8)
+            "EXCERPT" ("START-LINE" 2
+                       "TEXT" "(defn boom []\n  (throw bad))")
+            "FRAMES" (("FUNCTION" "boom"
+                       "NAMESPACE" "sample"
+                       "FILE" ,file
+                       "LINE" 3
+                       "COLUMN" 8)))))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory file) t)
+          (with-temp-file (expand-file-name "project.edn" root) (insert "{}"))
+          (with-temp-file file
+            (insert "(ns sample)\n(defn boom []\n  (throw bad))\n"))
+          (with-temp-buffer
+            (setq default-directory root)
+            (cl-letf (((symbol-function 'display-buffer) #'ignore))
+              (hara--show-error
+               `("EVAL_ERROR" "thrown: bad input" :details (,diagnostic))))
+            (with-current-buffer "*Hara Error*"
+              (should (derived-mode-p 'hara-error-mode))
+              (should (string-match-p "Exception:" (buffer-string)))
+              (should (string-match-p "Source excerpt:" (buffer-string)))
+              (should (string-match-p "Backtrace:" (buffer-string)))
+              (goto-char (point-min))
+              (search-forward "sample/boom")
+              (should (button-at (1- (point)))))))
+      (when (get-buffer "*Hara Error*") (kill-buffer "*Hara Error*"))
+      (delete-directory root t))))
+
 (ert-deftest hara-resp-encodes-utf8-by-byte-length ()
   (let ((encoded (hara--resp-encode-value "hé")))
     (should (equal encoded
@@ -223,6 +264,64 @@
           (cl-letf (((symbol-function 'hara--project-file-root)
                      (lambda () project)))
             (should (equal (hara--resolve-command) launcher))))
+      (delete-directory root t))))
+
+(ert-deftest hara-resolve-command-prefers-project-edn-bin ()
+  (let* ((root (make-temp-file "hara-project-bin-" t))
+         (source (expand-file-name "src/demo.hal" root))
+         (launcher (expand-file-name "bin/hara" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (make-directory (file-name-directory launcher) t)
+          (with-temp-file (expand-file-name "project.edn" root)
+            (insert "{:project/hara-bin \"bin/hara\"\n"
+                    " :project/distribution {:project/hara-bin \"ignored\"}}"))
+          (with-temp-file launcher (insert "#!/bin/sh\n"))
+          (set-file-modes launcher #o755)
+          (with-temp-buffer
+            (setq-local buffer-file-name source)
+            (let ((hara-command "/bin/sh"))
+              (should (equal (hara--resolve-command)
+                             (file-truename launcher))))))
+      (delete-directory root t))))
+
+(ert-deftest hara-project-edn-bin-is-limited-to-the-top-level-project-map ()
+  (let ((root (make-temp-file "hara-project-bin-nested-" t)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "project.edn" root)
+            (insert "{:project/distribution {:project/hara-bin \"ignored\"}}\n"))
+          (should-not (hara--project-edn-string root ":project/hara-bin")))
+      (delete-directory root t))))
+
+(ert-deftest hara-resolve-command-rejects-a-missing-project-edn-bin ()
+  (let* ((root (make-temp-file "hara-project-bin-missing-" t))
+         (source (expand-file-name "src/demo.hal" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (with-temp-file (expand-file-name "project.edn" root)
+            (insert "{:project/hara-bin \"bin/missing-hara\"}"))
+          (with-temp-buffer
+            (setq-local buffer-file-name source)
+            (let ((hara-command "/bin/sh"))
+              (should-error (hara--resolve-command) :type 'user-error))))
+      (delete-directory root t))))
+
+(ert-deftest hara-resolve-command-rejects-a-project-edn-bin-directory ()
+  (let* ((root (make-temp-file "hara-project-bin-directory-" t))
+         (source (expand-file-name "src/demo.hal" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (make-directory (expand-file-name "bin/hara" root) t)
+          (with-temp-file (expand-file-name "project.edn" root)
+            (insert "{:project/hara-bin \"bin/hara\"}"))
+          (with-temp-buffer
+            (setq-local buffer-file-name source)
+            (let ((hara-command "/bin/sh"))
+              (should-error (hara--resolve-command) :type 'user-error))))
       (delete-directory root t))))
 
 (ert-deftest hara-mode-auto-jacks-in-only-for-project-files ()

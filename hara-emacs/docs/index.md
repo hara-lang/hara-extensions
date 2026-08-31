@@ -97,6 +97,25 @@ installed artifact. Explicit jack-in endpoint publication may wait up to
 `hara-server-start-timeout` (15 seconds by default), while automatic discovery
 uses nonblocking endpoint negotiation bounded by `hara-connect-timeout`.
 
+### Per-project Hara executable
+
+Set a top-level `:project/hara-bin` string in `project.edn` to select the
+runtime used by Hara Emacs for that project. A relative path is resolved from
+the project root; the target must be an executable file. This takes precedence
+over the global `hara-command` fallback, so a checkout can pin Emacs to the Hara
+distribution it was developed and tested with:
+
+```clojure
+{:hara/type :project
+ :project/id acme/widgets
+ :project/hara-bin "target/hara/bin/hara"}
+```
+
+An absolute path is also supported. For a bare command name, Hara Emacs uses
+the executable found on `exec-path`. If the configured binary is missing or
+not executable, jack-in stops with an error naming that path instead of
+silently starting a different runtime.
+
 Common commands:
 
 - `C-c C-e`: evaluate the preceding form
@@ -139,9 +158,10 @@ fringe feedback and adaptive wrapping for long values. They clear after the next
 timeout configured by `hara-inline-result-duration` remains a fallback; customize
 `hara-inline-result-max-length` to control truncation.
 ElDoc stays silent until the current buffer has explicitly connected to Hara.
-Evaluation failures open a structured `*Hara Error*` buffer with nested
-namespace/top-level-form context, clickable source locations when the source
-is local, and the runtime stack including coroutine/fiber frames.
+Evaluation failures open a structured `*Hara Error*` backtrace buffer. When a
+protocol-4 runtime provides diagnostics it shows the exception code, bounded
+data, cause chain, primary source excerpt, and clickable coroutine/fiber
+frames; older runtimes retain the compatible textual stack fallback.
 
 ## `code.manage` workflows
 
