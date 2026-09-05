@@ -1,6 +1,6 @@
 # Hara for Emacs
 
-`hara-mode.el` provides Hara editing, protocol-4 evaluation, inline results, ElDoc, asynchronous
+`hara-mode.el` provides Hara editing with Paredit, protocol-4 evaluation, inline results, ElDoc, asynchronous
 Eglot completion, manual diagnostics, Xref navigation, Imenu, sessions, project-aware server
 startup, and a REPL. Its core uses built-in Emacs APIs; the optional documentation popup uses
 `eldoc-box`.
@@ -118,7 +118,8 @@ silently starting a different runtime.
 
 Common commands:
 
-- `C-c C-e`: evaluate the preceding form
+- `C-e`: Etude's evaluate-at-point command (`C-u C-e` evaluates and inserts the result at point)
+- `C-c C-e`: evaluate the preceding form (`C-u C-c C-e` also inserts the result at point)
 - `C-c C-i`: evaluate the preceding form and insert the result at point
 - `C-c C-c`: evaluate the top-level form
 - `C-c C-r`: evaluate the region

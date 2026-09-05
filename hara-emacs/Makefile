@@ -11,7 +11,7 @@ ELISP_COMPILED := $(ELISP_SOURCES:.el=.elc)
 .PHONY: all test test-install compile clean install install-files uninstall upgrade \
   bin-build bin-build-truffle bin-build-native bin-build-rust bin-build-rust-lite \
   bin-install bin-install-truffle bin-install-native bin-install-rust bin-install-rust-lite \
-  bin-clean
+  bin-clean project-native-status project-native-check _project-native-state
 
 all: compile test
 
@@ -59,6 +59,7 @@ upgrade:
 # ---------------------------------------------------------------------------
 
 HARA_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../../technology/hara
+HARA_PROJECT ?= .
 LOCAL_BIN ?= $(PREFIX)/bin
 LOCAL_SHARE ?= $(PREFIX)/share/hara-mode
 
@@ -109,3 +110,58 @@ bin-clean:
 	rm -f "$(TRUFFLE_JAR_DST)" "$(LOCAL_BIN)/hara-truffle" \
 	      "$(LOCAL_BIN)/hara-native" "$(LOCAL_BIN)/hara-rust" \
 	      "$(LOCAL_BIN)/hara-rust-lite"
+
+# ---------------------------------------------------------------------------
+# Project-configured Rust Native freshness checks
+# ---------------------------------------------------------------------------
+
+# `:project/distribution :host` is the executable used by C-c C-t. Resolve it
+# through hara-mode's deliberately small EDN reader so this check agrees with
+# Emacs instead of guessing from an arbitrary project.edn parser.
+project-native-status: NATIVE_CHECK_MODE = status
+project-native-status: _project-native-state
+
+project-native-check: NATIVE_CHECK_MODE = check
+project-native-check: _project-native-state
+
+_project-native-state:
+	@set -eu; \
+	project="$$(cd "$(HARA_PROJECT)" && pwd -P)"; \
+	configured="$$(HARA_PROJECT_ROOT="$$project" $(EMACS) --batch -Q -L . \
+	  --eval '(progn (load "hara-mode") (princ (or (hara--project-edn-map-string (getenv "HARA_PROJECT_ROOT") ":project/distribution" ":host") "")))')"; \
+	if test -z "$$configured"; then \
+	  printf 'NATIVE UNKNOWN project=%s reason=no :project/distribution :host\n' "$$project" >&2; \
+	  test "$(NATIVE_CHECK_MODE)" != check; \
+	  exit 0; \
+	fi; \
+	case "$$configured" in \
+	  /*) host="$$configured" ;; \
+	  *) host="$$project/$$configured" ;; \
+	esac; \
+	host="$$(cd "$$(dirname "$$host")" && pwd -P)/$$(basename "$$host")"; \
+	if test ! -x "$$host"; then \
+	  printf 'NATIVE STALE project=%s host=%s reason=missing-or-not-executable\n' "$$project" "$$host" >&2; \
+	  test "$(NATIVE_CHECK_MODE)" != check; \
+	  exit 0; \
+	fi; \
+	native_root="$$(cd "$$(dirname "$$host")/../../../.." && pwd -P)"; \
+	manifest="$$native_root/core/rust/Cargo.toml"; \
+	if test ! -f "$$manifest"; then \
+	  printf 'NATIVE UNKNOWN project=%s host=%s reason=not-a-hara-native-release-layout\n' "$$project" "$$host" >&2; \
+	  test "$(NATIVE_CHECK_MODE)" != check; \
+	  exit 0; \
+	fi; \
+	newer="$$(find "$$native_root/core/rust" -type f \
+	  \( -name '*.rs' -o -name Cargo.toml -o -name Cargo.lock \) \
+	  -newer "$$host" -print -quit)"; \
+	dirty="$$(git -C "$$native_root" status --porcelain -- core/rust 2>/dev/null || true)"; \
+	if test -n "$$newer"; then \
+	  printf 'NATIVE STALE project=%s host=%s newer-source=%s\n' "$$project" "$$host" "$$newer" >&2; \
+	  test "$(NATIVE_CHECK_MODE)" != check; \
+	  exit 0; \
+	fi; \
+	if test -n "$$dirty"; then \
+	  printf 'NATIVE CURRENT project=%s host=%s note=source-worktree-dirty-but-host-is-newer\n' "$$project" "$$host"; \
+	else \
+	  printf 'NATIVE CURRENT project=%s host=%s\n' "$$project" "$$host"; \
+	fi

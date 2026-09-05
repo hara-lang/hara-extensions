@@ -197,6 +197,51 @@
       (delete-process process)
       (kill-buffer buffer))))
 
+(ert-deftest hara-server-startup-error-includes-process-output ()
+  (let* ((buffer (generate-new-buffer " *hara-server-startup-error-test*"))
+         (process (make-pipe-process :name "hara-startup-error-test"
+                                     :buffer buffer :command '("cat")
+                                     :noquery t)))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert "hara: no installed version of hara:hara/code.test satisfies [^0.1.16]\n"))
+          (should (string-match-p
+                   "no installed version of hara:hara/code.test"
+                   (hara--server-startup-error process "exited abnormally"))))
+      (delete-process process)
+      (kill-buffer buffer))))
+
+(ert-deftest hara-server-startup-error-keeps-empty-output-concise ()
+  (let* ((buffer (generate-new-buffer " *hara-server-empty-error-test*"))
+         (process (make-pipe-process :name "hara-empty-error-test"
+                                     :buffer buffer :command '("cat")
+                                     :noquery t)))
+    (unwind-protect
+        (should (equal "startup timed out"
+                       (hara--server-startup-error process "startup timed out")))
+      (delete-process process)
+      (kill-buffer buffer))))
+
+(ert-deftest hara-server-sentinel-reports-process-output ()
+  (let* ((buffer (generate-new-buffer " *hara-server-sentinel-error-test*"))
+         (process (make-pipe-process :name "hara-sentinel-error-test"
+                                     :buffer buffer :command '("cat")
+                                     :noquery t))
+         result)
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert "hara: checkout dependency failed\n"))
+          (process-put process 'hara-endpoint-callback
+                       (lambda (_server _endpoint error)
+                         (setq result error)))
+          (cl-letf (((symbol-function 'process-live-p) (lambda (_) nil)))
+            (hara--server-process-sentinel process "exited abnormally"))
+          (should (string-match-p "checkout dependency failed" result)))
+      (delete-process process)
+      (kill-buffer buffer))))
+
 (ert-deftest hara-async-endpoint-uses-a-nonblocking-connect ()
   (let (arguments)
     (cl-letf (((symbol-function 'make-network-process)
@@ -435,6 +480,31 @@
                           " ")))))))
       (delete-directory root t))))
 
+(ert-deftest hara-test-command-uses-project-native-host-when-declared ()
+  (let* ((root (make-temp-file "hara-native-test-project-" t))
+         (source (expand-file-name "test/sample_test.hal" root))
+         (host (expand-file-name "bin/hara-native" root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory source) t)
+          (make-directory (file-name-directory host) t)
+          (with-temp-file (expand-file-name "project.edn" root)
+            (insert "{:project/distribution {:host \"bin/hara-native\"}}"))
+          (with-temp-file source (insert "(ns sample-test)"))
+          (with-temp-file host (insert "#!/bin/sh\n"))
+          (set-file-modes host #o755)
+          (with-temp-buffer
+            (setq-local buffer-file-name source)
+            (should (equal
+                     (hara--test-command source)
+                     (mapconcat
+                      #'shell-quote-argument
+                      (list (file-truename host) "test" "--project"
+                            (file-name-as-directory (file-truename root))
+                            "--file" source)
+                      " ")))))
+      (delete-directory root t))))
+
 (ert-deftest hara-source-test-counterpart-supports-native-layouts ()
   (let* ((root (make-temp-file "hara-pair-project-" t))
          (source (expand-file-name "lib/src/tool/example.hal" root))
@@ -499,6 +569,110 @@
     (insert "(defn answer []\n  42) ; comment")
     (font-lock-ensure)
     (should (eq (get-text-property 2 'face) 'font-lock-keyword-face))))
+
+(ert-deftest hara-mode-enables-paredit-when-available ()
+  (let (prefix)
+    (cl-letf (((symbol-function 'enable-paredit-mode)
+               (lambda () (setq prefix current-prefix-arg))))
+      (with-temp-buffer
+        (hara-mode)
+        (should prefix)))))
+
+(ert-deftest hara-mode-keeps-metadata-attached-for-sexp-motion ()
+  (with-temp-buffer
+    (hara-mode)
+    (insert "^{:refer demo/foo}\n(fact demo)")
+    (should (eq (char-syntax ?^) ?\'))
+    (goto-char (point-min))
+    (forward-sexp)
+    (backward-sexp)
+    (should (= (point) (point-min)))))
+
+(ert-deftest hara-mode-indents-hara-forms-and-keyword-maps ()
+  (with-temp-buffer
+    (hara-mode)
+    (insert "(ns demo.core\n"
+            "(:config\n"
+            "{:role :internal})\n"
+            "(:require\n"
+            "[a :as a]\n"
+            "[b :as b]))\n"
+            "\n"
+            "(fact sample\n"
+            "(when predicate\n"
+            "(assert value)))\n"
+            "\n"
+            "(fact:global\n"
+            "{:setup [(start)]\n"
+            ":teardown [(stop)]})\n"
+            "\n"
+            "(Test/check\n"
+            "[{:name sample\n"
+            ":test (fn [] true)}])\n"
+            "\n"
+            "(defn.pg query\n"
+            "doc\n"
+            "{:return :text}\n"
+            "[db]\n"
+            "(select db))\n"
+            "\n"
+            "(l/script- :js\n"
+            "{:require [[sample.core :as sample]]})\n"
+            "\n"
+            "(intern-in\n"
+            "[answer source/answer]\n"
+            "[other source/other])")
+    (indent-region (point-min) (point-max))
+    (let ((expected
+           (concat "(ns demo.core\n"
+                   "  (:config\n"
+                   "    {:role :internal})\n"
+                   "  (:require\n"
+                   "    [a :as a]\n"
+                   "    [b :as b]))\n"
+                   "\n"
+                   "(fact sample\n"
+                   "  (when predicate\n"
+                   "    (assert value)))\n"
+                   "\n"
+                   "(fact:global\n"
+                   "  {:setup [(start)]\n"
+                   "   :teardown [(stop)]})\n"
+                   "\n"
+                   "(Test/check\n"
+                   "  [{:name sample\n"
+                   "    :test (fn [] true)}])\n"
+                   "\n"
+                   "(defn.pg query\n"
+                   "  doc\n"
+                   "  {:return :text}\n"
+                   "  [db]\n"
+                   "  (select db))\n"
+                   "\n"
+                   "(l/script- :js\n"
+                   "  {:require [[sample.core :as sample]]})\n"
+                   "\n"
+                   "(intern-in\n"
+                   "  [answer source/answer]\n"
+                   "  [other source/other])")))
+      (should (equal (buffer-string) expected))
+      (should-not (string-match-p "\t" (buffer-string)))
+      (indent-region (point-min) (point-max))
+      (should (equal (buffer-string) expected)))))
+
+(ert-deftest hara-mode-indents-first-key-after-standalone-map-opener ()
+  (with-temp-buffer
+    (hara-mode)
+    (insert "(def value\n"
+            "{\n"
+            ":first 1\n"
+            ":second 2})")
+    (indent-region (point-min) (point-max))
+    (should (equal (buffer-string)
+                   (concat "(def value\n"
+                           "  {\n"
+                           "    :first 1\n"
+                           "    :second 2})")))))
 
 (ert-deftest hara-mode-highlights-private-definitions ()
   (with-temp-buffer
@@ -739,6 +913,33 @@
          connection '("(def answer 42)") #'ignore #'ignore))
       (should (equal requests '(("EVAL" "(def answer 42)")))))))
 
+(ert-deftest hara-eval-resynchronises-when-the-namespace-form-changes ()
+  (with-temp-buffer
+    (insert "(ns sample.core\n  (:require [work.core :as work]))\n"
+            "(work.core/bundle? {})")
+    (let ((connection
+           (hara--make-connection
+            :namespace "sample.core"
+            :namespace-source "(ns sample.core)"
+            :pending (make-hash-table :test #'equal)))
+          requests)
+      (cl-letf (((symbol-function 'hara--request)
+                 (lambda (_connection operation arguments success &optional _failure)
+                   (push (cons operation arguments) requests)
+                   (funcall success (if (= (length requests) 1)
+                                        "nil"
+                                      "value")))))
+        (hara--eval-in-buffer-namespace
+         connection '("(work.core/bundle? {})") #'ignore #'ignore))
+      (setq requests (nreverse requests))
+      (should (= (length requests) 2))
+      (should (string-match-p
+               "(:require \\[work.core :as work\\])"
+               (car (cdr (car requests)))))
+      (should (equal (cdr (cadr requests)) '("(work.core/bundle? {})")))
+      (should (equal (hara-connection-namespace-source connection)
+                     (plist-get (hara--buffer-namespace-context) :source))))))
+
 (ert-deftest hara-xref-builds-source-location-from-doc-response ()
   (let ((hara--connection
          (hara--make-connection :root "/tmp/" :pending (make-hash-table))))
@@ -965,5 +1166,28 @@
             (hara-eval-last-sexp-and-insert)
             (should (string= (buffer-string) "(+ 1 2) 3")))
         (delete-process process)))))
+
+(ert-deftest hara-eval-last-sexp-prefix-inserts-result ()
+  "A prefix argument to eval-last-sexp should insert the runtime result."
+  (with-temp-buffer
+    (hara-mode)
+    (insert "(+ 1 2) ")
+    (let* ((process (make-pipe-process :name "hara-prefix-insert-test"
+                                       :command '("cat") :noquery t))
+           (hara--connection
+            (hara--make-connection :process process
+                                   :pending (make-hash-table :test #'equal))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'hara--request)
+                     (lambda (_connection _command _arguments success _error)
+                       (funcall success "3"))))
+            (hara-eval-last-sexp '(4))
+            (should (string= (buffer-string) "(+ 1 2) 3")))
+        (delete-process process)))))
+
+(ert-deftest hara-mode-leaves-c-e-to-etude ()
+  (with-temp-buffer
+    (hara-mode)
+    (should-not (lookup-key hara-mode-map (kbd "C-e")))))
 
 ;;; hara-mode-test.el ends here

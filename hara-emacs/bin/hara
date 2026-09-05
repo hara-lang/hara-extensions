@@ -2,12 +2,48 @@
 # Launcher wrapper used by hara-mode.
 #
 # The backend is selected with HARA_BACKEND (truffle, native, rust, rust-lite).
-# It defaults to the Truffle jar, which is the most compatible runtime.
+# When the current workspace distribution exists, it is the default runtime;
+# otherwise the launcher falls back to the legacy Truffle jar.
 #
 # Freshly-built artifacts in the repo are preferred over installed copies in
 # ~/.local, so `make bin-build` alone is enough to pick up source changes.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+diag() {
+    [ -n "${HARA_DIAGNOSTICS:-}" ] && echo "hara-launcher: $*" >&2
+}
+
+# The current workspace keeps the Hara source and native host in sibling
+# projects.  Prefer the freshly generated relocatable distribution when this
+# launcher is being used from that workspace.
+WORKSPACE_ROOT=""
+if [ -n "${HARA_WORKSPACE_ROOT:-}" ] && [ -d "$HARA_WORKSPACE_ROOT" ]; then
+    WORKSPACE_ROOT="$(cd "$HARA_WORKSPACE_ROOT" && pwd)"
+elif [ -d "$SCRIPT_DIR/../../../technology/hara" ]; then
+    WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+fi
+
+CURRENT_HARA_ROOT="${WORKSPACE_ROOT:+$WORKSPACE_ROOT/technology/hara}"
+CURRENT_HARA_BIN="${CURRENT_HARA_ROOT:+$CURRENT_HARA_ROOT/target/hara/bin/hara}"
+CURRENT_HARA_ARCHIVE="${CURRENT_HARA_ROOT:+$CURRENT_HARA_ROOT/target/hara/lib/hara.harp}"
+CURRENT_HARA_NATIVE="${WORKSPACE_ROOT:+$WORKSPACE_ROOT/technology/hara-native/core/rust/target/release/hara-native}"
+
+if [ -z "${HARA_BACKEND:-}" ] && [ -x "$CURRENT_HARA_BIN" ]; then
+    DIST_HOME="${HARA_DIST_HOME:-$CURRENT_HARA_ROOT/target/hara/.dist}"
+    export HARA_DIST_HOME="$DIST_HOME"
+    if [ -x "$CURRENT_HARA_NATIVE" ] && [ -r "$CURRENT_HARA_ARCHIVE" ]; then
+        mkdir -p "$DIST_HOME"
+        diag "installing workspace Hara package: $CURRENT_HARA_ARCHIVE"
+        if ! "$CURRENT_HARA_NATIVE" bundle install "$CURRENT_HARA_ARCHIVE" >/dev/null; then
+            echo "Hara workspace package installation failed: $CURRENT_HARA_ARCHIVE" >&2
+            exit 1
+        fi
+    fi
+    diag "using workspace Hara distribution: $CURRENT_HARA_BIN"
+    exec "$CURRENT_HARA_BIN" "$@"
+fi
+
 BACKEND="${HARA_BACKEND:-truffle}"
 
 # Support both the current workspace layout and the former Hara monorepo
@@ -19,10 +55,6 @@ elif [ -d "$SCRIPT_DIR/../../../technology/hara/core" ]; then
 else
     HARA_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 fi
-
-diag() {
-    [ -n "${HARA_DIAGNOSTICS:-}" ] && echo "hara-launcher: $*" >&2
-}
 
 if [ "$BACKEND" = "truffle" ]; then
     if [ -z "$HARA_RUNTIME_JAR" ]; then

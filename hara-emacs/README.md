@@ -1,6 +1,6 @@
 # Hara for Emacs
 
-`hara-mode.el` provides Hara editing, protocol-4 evaluation, inline results, ElDoc, asynchronous
+`hara-mode.el` provides Hara editing with Paredit, protocol-4 evaluation, inline results, ElDoc, asynchronous
 Eglot completion, manual diagnostics, Xref navigation, Imenu, sessions, project-aware server
 startup, and a REPL. Its core uses built-in Emacs APIs; the optional documentation popup uses
 `eldoc-box`.
@@ -121,9 +121,25 @@ the executable found on `exec-path`. If the configured binary is missing or
 not executable, jack-in stops with an error naming that path instead of
 silently starting a different runtime.
 
+### Focused native tests
+
+When `project.edn` declares a distribution host, `C-c C-t` runs the current
+file through that native test host rather than evaluating its forms over RESP:
+
+```clojure
+:project/distribution {:host "../hara-native/core/rust/target/release/hara-native"}
+```
+
+For example, the resulting focused command is
+`hara-native test --project <root> --file <file>`. This runs `fact:global`
+setup and teardown, so deferred `l/script-` runtimes are started before their
+`!.js` assertions execute. Projects without a declared native host retain the
+existing Hara project-test command.
+
 Common commands:
 
-- `C-c C-e`: evaluate the preceding form
+- `C-e`: Etude's evaluate-at-point command (`C-u C-e` evaluates and inserts the result at point)
+- `C-c C-e`: evaluate the preceding form (`C-u C-c C-e` also inserts the result at point)
 - `C-c C-i`: evaluate the preceding form and insert the result at point
 - `C-c C-c`: evaluate the top-level form
 - `C-c C-r`: evaluate the region

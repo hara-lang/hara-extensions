@@ -4,7 +4,7 @@
 ;; Author: Hoebat Kappa Mu <1455572+hoebat@users.noreply.github.com>
 ;; Keywords: languages, lisp, tools
 ;; URL: https://github.com/hara-lang/hara-extensions
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "29.1") (paredit "25"))
 ;; Version: 0.1.0
 
 ;; Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,8 @@
 ;; limitations under the License.
 
 ;;; Commentary:
-;; A dependency-free Hara major mode, protocol-4 client, project launcher, and REPL.
+;; A Hara major mode with Paredit editing, protocol-4 client, project launcher,
+;; and REPL.
 
 ;;; Code:
 
@@ -31,6 +32,7 @@
 (require 'eldoc)
 (require 'imenu)
 (require 'button)
+(require 'paredit nil t)
 (require 'hara-manage nil t)
 (require 'project)
 (require 'seq)
@@ -234,6 +236,51 @@ reader."
                 (_ (forward-char 1)))))
           value)))))
 
+(defun hara--project-edn-map-string (root map-key key)
+  "Return ROOT's string KEY from the top-level EDN map MAP-KEY.
+
+This intentionally reads only the small nested configuration surface needed
+before a Hara runtime has started.  It is not a general EDN reader."
+  (let ((project-file (expand-file-name "project.edn" root)))
+    (when (file-readable-p project-file)
+      (with-temp-buffer
+        (insert-file-contents project-file)
+        (goto-char (point-min))
+        (let ((depth 0)
+              map-depth
+              value)
+          (while (and (not value) (not (eobp)))
+            (hara--edn-skip-space-and-comments)
+            (unless (eobp)
+              (pcase (char-after)
+                ((or ?{ ?\[ ?\() (setq depth (1+ depth)) (forward-char 1))
+                ((or ?} ?\] ?\))
+                 (when (and map-depth (= depth map-depth))
+                   (setq map-depth nil))
+                 (setq depth (max 0 (1- depth)))
+                 (forward-char 1))
+                (?\" (hara--edn-skip-string))
+                (?:
+                 (let ((start (point)))
+                   (skip-chars-forward "^ \t\r\n,{}[]();\"")
+                   (let ((candidate (buffer-substring-no-properties start (point))))
+                     (cond
+                      ((and (= depth 1) (string= candidate map-key))
+                       (hara--edn-skip-space-and-comments)
+                       (unless (eq (char-after) ?{)
+                         (user-error "project.edn %s must be an EDN map" map-key))
+                       (setq depth (1+ depth)
+                             map-depth depth)
+                       (forward-char 1))
+                      ((and map-depth (= depth map-depth) (string= candidate key))
+                       (hara--edn-skip-space-and-comments)
+                       (unless (eq (char-after) ?\")
+                         (user-error "project.edn %s %s must be an EDN string"
+                                     map-key key))
+                       (setq value (hara--edn-read-string)))))))
+                (_ (forward-char 1)))))
+          value)))))
+
 (defun hara--project-command ()
   "Return the executable configured by the current project's project.edn."
   (when-let* ((root (hara--project-file-root))
@@ -247,6 +294,22 @@ reader."
        (path-command path-command)
        (t
         (user-error "project.edn :project/hara-bin is not executable: %s"
+                    candidate))))))
+
+(defun hara--project-native-host ()
+  "Return the current project's native test host, when one is declared."
+  (when-let* ((root (hara--project-file-root))
+              (configured (hara--project-edn-map-string
+                           root ":project/distribution" ":host")))
+    (let* ((candidate (expand-file-name configured root))
+           (path-command (and (not (file-name-directory configured))
+                              (executable-find configured))))
+      (cond
+       ((and (file-regular-p candidate) (file-executable-p candidate))
+        (file-truename candidate))
+       (path-command path-command)
+       (t
+        (user-error "project.edn :project/distribution :host is not executable: %s"
                     candidate))))))
 
 (defun hara--resolve-command ()
@@ -350,7 +413,8 @@ Set this to nil to retain results until the next edit or evaluation."
 (define-error 'hara-resp-error "RESP protocol error")
 
 (cl-defstruct (hara-connection (:constructor hara--make-connection))
-  root host port process server-process pending counter session namespace instance project
+  root host port process server-process pending counter session namespace namespace-source
+  instance project
   refs doc-cache repl-buffer)
 
 (defvar hara--connections (make-hash-table :test #'equal))
@@ -599,13 +663,17 @@ Accept both the Truffle `PROTO' field and Rust's `PROTOCOL' field."
 
 (defun hara--test-command (&optional file)
   "Build the native Hara project test command, optionally focused on FILE."
-  (let ((root (hara--project-file-root)))
+  (let ((root (hara--project-file-root))
+        (host (hara--project-native-host)))
     (unless root
       (user-error "No project.edn found above the current file"))
     (mapconcat #'shell-quote-argument
-               (append (list (hara--resolve-command)
-                             "--project" root "--offline" "project" "test")
-                       (and file (list (expand-file-name file))))
+               (if host
+                   (append (list host "test" "--project" root)
+                           (and file (list "--file" (expand-file-name file))))
+                 (append (list (hara--resolve-command)
+                               "--project" root "--offline" "project" "test")
+                         (and file (list (expand-file-name file)))))
                " ")))
 
 (defconst hara--source-test-layouts
@@ -873,13 +941,35 @@ the Emacs command loop."
               (hara--cancel-process-timer server 'hara-server-start-timer)
               (funcall callback server endpoint nil))))))))
 
+(defun hara--server-startup-output (process)
+  "Return the most recent diagnostic output captured for PROCESS.
+
+Keep the tail bounded so a noisy compiler cannot turn a startup error into an
+unbounded minibuffer message.  The complete output remains available in the
+server buffer named by the caller."
+  (when-let ((buffer (process-buffer process)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (let* ((limit 4096)
+               (start (max (point-min) (- (point-max) limit))))
+          (string-trim (buffer-substring-no-properties start (point-max))))))))
+
+(defun hara--server-startup-error (process event)
+  "Combine startup EVENT with diagnostic output captured for PROCESS."
+  (let ((event (string-trim (or event "Hara server exited")))
+        (output (hara--server-startup-output process)))
+    (if (string-empty-p (or output ""))
+        event
+      (format "%s: %s" event output))))
+
 (defun hara--server-process-sentinel (process event)
   "Report an asynchronous Hara server startup failure."
   (unless (process-live-p process)
     (when-let ((callback (process-get process 'hara-endpoint-callback)))
       (process-put process 'hara-endpoint-callback nil)
       (hara--cancel-process-timer process 'hara-server-start-timer)
-      (funcall callback process nil (string-trim event)))))
+      (funcall callback process nil
+               (hara--server-startup-error process event)))))
 
 (defun hara--accept-endpoint-hello (connection hello expected-instance)
   "Validate HELLO and mark CONNECTION as negotiated."
@@ -931,9 +1021,16 @@ the Emacs command loop."
                   (< (float-time) deadline))
         (accept-process-output process 0.05)))
     (unless endpoint
-      (when (process-live-p process) (delete-process process))
-      (error "Hara server did not publish an endpoint; see %s"
-             (buffer-name buffer)))
+      (let ((diagnostic
+             (hara--server-startup-error
+              process
+              (if (process-live-p process)
+                  "startup timed out"
+                "process exited"))))
+        (when (process-live-p process) (delete-process process))
+        (error "Hara server did not publish an endpoint: %s; see %s"
+               diagnostic
+               (buffer-name buffer))))
     (condition-case error
         (hara--open-endpoint root (car endpoint) (cdr endpoint) nil process)
       (error
@@ -987,7 +1084,8 @@ the Emacs command loop."
             (delete-process process))
           (funcall endpoint-callback
                    process nil
-                   (format "Hara server did not publish an endpoint; see %s"
+                   (format "Hara server did not publish an endpoint: %s; see %s"
+                           (hara--server-startup-error process "startup timed out")
                            (buffer-name buffer)))))))
     (message "Starting Hara server for project %s: %s"
              (file-name-nondirectory (directory-file-name root)) command)
@@ -1647,20 +1745,28 @@ ordinal."
     (connection arguments success failure)
   "Evaluate ARGUMENTS after synchronising CONNECTION to this buffer's namespace."
   (let ((context (hara--buffer-namespace-context)))
-    (if (or (null context)
-            (equal (plist-get context :name)
-                   (hara-connection-namespace connection)))
+    (let* ((namespace (and context (plist-get context :name)))
+           (source (and context (plist-get context :source)))
+           (synchronised
+            (and context
+                 (equal namespace (hara-connection-namespace connection))
+                 ;; Older connections have no source fingerprint.  Preserve
+                 ;; their established namespace state until the next explicit
+                 ;; namespace evaluation records one.
+                 (or (null (hara-connection-namespace-source connection))
+                     (equal source
+                            (hara-connection-namespace-source connection))))))
+      (if (or (null context) synchronised)
         (hara--request connection "EVAL" arguments success failure)
-      (let ((namespace (plist-get context :name))
-            (namespace-arguments
-             (hara--source-arguments (plist-get context :source)
-                                     (plist-get context :start))))
-        (hara--request
-         connection "EVAL" namespace-arguments
-         (lambda (_)
-           (setf (hara-connection-namespace connection) namespace)
-           (hara--request connection "EVAL" arguments success failure))
-         failure)))))
+        (let ((namespace-arguments
+               (hara--source-arguments source (plist-get context :start))))
+          (hara--request
+           connection "EVAL" namespace-arguments
+           (lambda (_)
+             (setf (hara-connection-namespace connection) namespace
+                   (hara-connection-namespace-source connection) source)
+             (hara--request connection "EVAL" arguments success failure))
+           failure))))))
 
 (defun hara--eval (source &optional start end)
   (let* ((connection (hara--connection))
@@ -1705,11 +1811,14 @@ so a partial name is never evaluated."
           (point))))
 
 ;;;###autoload
-(defun hara-eval-last-sexp ()
-  "Evaluate the form preceding point."
-  (interactive)
-  (let ((bounds (hara--last-sexp-bounds)))
-    (hara-eval-region (car bounds) (cdr bounds))))
+(defun hara-eval-last-sexp (&optional insert)
+  "Evaluate the form preceding point.
+With a prefix argument INSERT, insert the evaluated result at point."
+  (interactive "P")
+  (if insert
+      (hara-eval-last-sexp-and-insert)
+    (let ((bounds (hara--last-sexp-bounds)))
+      (hara-eval-region (car bounds) (cdr bounds)))))
 
 ;;;###autoload
 (defun hara-eval-last-sexp-and-insert ()
@@ -1732,6 +1841,13 @@ so a partial name is never evaluated."
                (insert value)))))
        (lambda (error)
          (hara--show-error error (hara-connection-root connection)))))))
+
+(defun hara--end-of-line-or-eval-last-sexp (&optional prefix)
+  "Move to the end of the line, or eval-and-insert with PREFIX."
+  (interactive "P")
+  (if prefix
+      (hara-eval-last-sexp prefix)
+    (end-of-line)))
 
 ;;;###autoload
 (defun hara-eval-defun ()
@@ -2254,7 +2370,8 @@ so a partial name is never evaluated."
      connection "SESSION" (list "ATTACH" selected)
      (lambda (_)
        (setf (hara-connection-session connection) selected
-             (hara-connection-namespace connection) nil)
+             (hara-connection-namespace connection) nil
+             (hara-connection-namespace-source connection) nil)
        (force-mode-line-update t)
        (message "Hara session: %s" selected)))))
 
@@ -2291,6 +2408,7 @@ so a partial name is never evaluated."
      connection "EVAL" (list input)
      (lambda (value)
        (setf (hara-connection-namespace connection) nil)
+       (setf (hara-connection-namespace-source connection) nil)
        (when (buffer-live-p buffer)
          (with-current-buffer buffer
            (hara--repl-insert (format "=> %s\n[%s] "
@@ -2349,6 +2467,10 @@ so a partial name is never evaluated."
     (modify-syntax-entry ?\; "<" table)
     (modify-syntax-entry ?\n ">" table)
     (modify-syntax-entry ?\" "\"" table)
+    ;; Metadata prefixes belong to the form that follows them.  Marking ^ as
+    ;; a prefix keeps Emacs' sexp motion (and Paredit's structural commands)
+    ;; from stopping inside a metadata map.
+    (modify-syntax-entry ?^ "'" table)
     ;; Hara symbol constituents beyond word characters.
     (dolist (char (string-to-list "-_*+!?<>=/.:&%$"))
       (modify-syntax-entry char "_" table))
@@ -2362,6 +2484,144 @@ so a partial name is never evaluated."
     "loop" "new" "ns" "ns+" "protocol" "quote" "recur" "require" "some->"
     "some->>" "syntax-quote" "throw" "try" "when" "when-let" "when-not"
     "while" "with-local-vars" "with-open" "with-redefs"))
+
+(defconst hara--indent-defun-forms
+  '("fn" "fact" "facts" "against-background")
+  "Hara forms whose body follows defun-style indentation.
+
+Definitions are handled by the `def' prefix in `hara--indent-rule', so new
+Hara definition macros inherit the same layout automatically.")
+
+(defconst hara--indent-specforms
+  '(("case" . 1)
+    ("catch" . 2)
+    ("cond" . 0)
+    ("comment" . 0)
+    ("do" . 0)
+    ("doseq" . 1)
+    ("extend-type" . 1)
+    ("fact:global" . 0)
+    ("finally" . 0)
+    ("for" . 1)
+    ("if" . 2)
+    ("if-let" . 1)
+    ("if-not" . 2)
+    ("if-some" . 1)
+    ("intern-all" . 0)
+    ("intern-in" . 0)
+    ("l/script" . 1)
+    ("l/script-" . 1)
+    ("let" . 1)
+    ("let*" . 1)
+    ("loop" . 1)
+    ("ns" . 1)
+    ("ns+" . 1)
+    ("syntax-quote" . 0)
+    ("Test/check" . 0)
+    ("Test/register" . 0)
+    ("try" . 0)
+    ("when" . 1)
+    ("when-first" . 1)
+    ("when-let" . 1)
+    ("when-not" . 1)
+    ("when-some" . 1)
+    ("while" . 1)
+    ("with-local-vars" . 1)
+    ("with-open" . 1)
+    ("with-redefs" . 1))
+  "Hara forms mapped to `lisp-indent-specform' argument counts.
+
+Keyword-headed forms are treated as zero-argument specforms by
+`hara--indent-rule', which keeps namespace clauses such as `:require' and
+`:config' in the same two-space block style as the surrounding form.")
+
+(defun hara--indent-rule (head &optional opener)
+  "Return the local indentation rule for Hara form HEAD, or nil.
+
+The returned value is an Emacs Lisp indentation rule: `defun', an integer
+argument count, or nil for the regular Lisp fallback.  Definition forms use a
+prefix rule so the Hara extension families (`defn.xt', `defn.pg', and so on)
+remain aligned without maintaining a second list of every generated macro."
+  (when head
+    (cond
+     ((string-prefix-p "def" head) 'defun)
+     ((member head hara--indent-defun-forms) 'defun)
+     ((and (eq opener ?\() (string-prefix-p ":" head)) 0)
+     ((cdr (assoc head hara--indent-specforms))))))
+
+(defun hara--indent-head (state)
+  "Return the symbol text at the head of the containing form in STATE."
+  (when (and (consp state) (nth 1 state))
+    (save-excursion
+      (goto-char (1+ (nth 1 state)))
+      (while (progn
+               (skip-chars-forward " \t\r\n")
+               (when (eq (char-after) ?\;)
+                 (let ((before (point)))
+                   (forward-comment 1)
+                   (> (point) before)))))
+      (let ((start (point)))
+        (condition-case nil
+            (progn
+              (forward-sexp 1)
+              (buffer-substring-no-properties start (point)))
+          (scan-error nil))))))
+
+(defun hara--map-entry-line-p (indent-point state)
+  "Return non-nil when INDENT-POINT starts a map keyword entry in STATE."
+  (and (consp state)
+       (nth 1 state)
+       (eq (char-after (nth 1 state)) ?{)
+       (save-excursion
+         (goto-char indent-point)
+         (back-to-indentation)
+         (eq (char-after) ?:))))
+
+(defun hara--map-entry-indent (state)
+  "Return the keyword column for a map entry in STATE.
+
+Hara maps conventionally put their first key immediately after `{'.  Keep
+continuation keys in that column; when the opening brace stands alone, use a
+two-space nested block instead."
+  (save-excursion
+    (goto-char (nth 1 state))
+    (let ((column (current-column)))
+      (forward-char 1)
+      (if (looking-at "[ \t]*\\(?:;.*\\)?$")
+          (+ column 2)
+        (1+ column)))))
+
+(defun hara--lisp-indent-function (indent-point state)
+  "Indent Hara forms using local rules and the standard Lisp fallback."
+  (let* ((normal-indent (current-column))
+         (head (hara--indent-head state))
+         (opener (and (consp state)
+                      (nth 1 state)
+                      (char-after (nth 1 state))))
+         (rule (and head (hara--indent-rule head opener))))
+    (cond
+     ((hara--map-entry-line-p indent-point state)
+      (hara--map-entry-indent state))
+     ((eq rule 'defun)
+      (lisp-indent-defform state indent-point))
+     ((integerp rule)
+      (lisp-indent-specform rule state indent-point normal-indent))
+     (t
+      (lisp-indent-function indent-point state)))))
+
+(defun hara--indent-line ()
+  "Indent the current Hara line, including a first key after a map opener."
+  (let* ((indent-point (line-beginning-position))
+         (state (syntax-ppss indent-point)))
+    (if (hara--map-entry-line-p indent-point state)
+        (let ((pos (- (point-max) (point)))
+              (indent (hara--map-entry-indent state)))
+          (beginning-of-line)
+          (skip-chars-forward " \t")
+          (indent-line-to indent)
+          (if (> (- (point-max) pos) (point))
+              (goto-char (- (point-max) pos))))
+      (lisp-indent-line))))
 
 (defconst hara-font-lock-keywords
   `((,(regexp-opt hara--language-forms 'symbols) . font-lock-keyword-face)
@@ -2392,6 +2652,9 @@ so a partial name is never evaluated."
     (define-key map (kbd "C-c C-j") #'hara-jack-in)
     (define-key map (kbd "C-c C-b") #'hara-interrupt)
     (define-key map (kbd "C-c C-z") #'hara-repl)
+    ;; Leave C-e unbound here.  Etude owns that global evaluation key and its
+    ;; modal dispatch calls `hara-eval-last-sexp', including prefix insertion.
+    ;; Binding it in the major-mode map would shadow Etude in terminal Emacs.
     (define-key map (kbd "C-c C-e") #'hara-eval-last-sexp)
     (define-key map (kbd "C-c C-i") #'hara-eval-last-sexp-and-insert)
     (define-key map (kbd "C-c C-c") #'hara-eval-defun)
@@ -2434,7 +2697,9 @@ so a partial name is never evaluated."
   (setq-local font-lock-defaults '(hara-font-lock-keywords))
   (setq-local comment-start ";")
   (setq-local comment-end "")
-  (setq-local indent-line-function #'lisp-indent-line)
+  (setq-local indent-tabs-mode nil)
+  (setq-local lisp-indent-function #'hara--lisp-indent-function)
+  (setq-local indent-line-function #'hara--indent-line)
   (setq-local imenu-generic-expression hara-imenu-generic-expression)
   ;; Treemacs obtains file tags through Imenu.  Eglot's Imenu provider makes
   ;; a synchronous textDocument/documentSymbol request, which would run the
@@ -2448,6 +2713,11 @@ so a partial name is never evaluated."
   (add-hook 'xref-backend-functions #'hara--xref-backend nil t)
   (add-hook 'after-change-functions #'hara--clear-result-overlay nil t)
   (eldoc-mode 1)
+  (when (fboundp 'enable-paredit-mode)
+    ;; Hara buffers are often intentionally incomplete while being edited.
+    ;; Paredit's explicit prefix argument permits activation in that state.
+    (let ((current-prefix-arg t))
+      (enable-paredit-mode)))
   (hara--schedule-auto-jack-in)
   (hara--maybe-start-eglot))
 
