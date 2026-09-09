@@ -2,6 +2,7 @@
 
 ;; Copyright 2026 The Hara Authors
 ;; Author: Hoebat Kappa Mu <1455572+hoebat@users.noreply.github.com>
+;; Assisted-by: OpenAI Codex: GPT-5
 ;; Package-Requires: ((emacs "29.1"))
 ;; Version: 0.1.0
 ;; Keywords: languages, tools
