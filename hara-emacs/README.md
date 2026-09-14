@@ -121,6 +121,28 @@ the executable found on `exec-path`. If the configured binary is missing or
 not executable, jack-in stops with an error naming that path instead of
 silently starting a different runtime.
 
+### Refresh the sibling native distribution
+
+hara-emacs/bin/hara is a thin launcher: in the Greenways workspace it consumes
+technology/hara/target/hara. When a new hara-native release is available, run
+the Hara-side updater from that project root:
+
+From the workspace root, the same operation is:
+
+    make hara-native-update
+
+    cd /path/to/workspace/technology/hara
+    HARA_NATIVE_UPDATE_RUN=1 \
+    HARA_NATIVE_VERSION=0.1.33 \
+    ../hara-native/core/rust/target/release/hara-native \
+      test --project . --file test/tool/native_update_test.hal
+
+This updates the Hara project pin, rebuilds the distribution consumed by this
+launcher, and verifies extensions/hara-emacs/bin/hara --version. No separate
+Emacs Lisp version edit is required. If a shared `HARA_DIST_HOME` contains a
+different registration for the same source version, the launcher preserves it
+as a timestamped `.stale-*` backup and retries the current package install.
+
 ### Focused native tests
 
 When `project.edn` declares a distribution host, `C-c C-t` runs the current

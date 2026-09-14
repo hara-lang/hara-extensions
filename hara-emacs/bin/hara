@@ -35,7 +35,53 @@ if [ -z "${HARA_BACKEND:-}" ] && [ -x "$CURRENT_HARA_BIN" ]; then
     if [ -x "$CURRENT_HARA_NATIVE" ] && [ -r "$CURRENT_HARA_ARCHIVE" ]; then
         mkdir -p "$DIST_HOME"
         diag "installing workspace Hara package: $CURRENT_HARA_ARCHIVE"
-        if ! "$CURRENT_HARA_NATIVE" bundle install "$CURRENT_HARA_ARCHIVE" >/dev/null; then
+        install_log="$(mktemp "${TMPDIR:-/tmp}/hara-workspace-install.XXXXXX")"
+        "$CURRENT_HARA_NATIVE" bundle install "$CURRENT_HARA_ARCHIVE" >"$install_log" 2>&1
+        install_status=$?
+        if [ "$install_status" -eq 0 ]; then
+            rm -f "$install_log"
+        else
+            registration="$(grep -Eo 'package/registration-conflict: [^[:space:]]+\.edn' \
+                "$install_log" | head -n 1 | cut -d' ' -f2-)"
+            case "$registration" in
+                "$DIST_HOME"/packages/hara/hara/foundation/*.edn)
+                    stale_stamp="$(date +%Y%m%d%H%M%S)-$$"
+                    stale_backup="${registration}.stale-${stale_stamp}"
+                    stale_suffix=0
+                    while [ -e "$stale_backup" ]; do
+                        stale_suffix=$((stale_suffix + 1))
+                        stale_backup="${registration}.stale-${stale_stamp}-${stale_suffix}"
+                    done
+                    diag "moving stale package registration: $registration -> $stale_backup"
+                    if mv "$registration" "$stale_backup"; then
+                        "$CURRENT_HARA_NATIVE" bundle install "$CURRENT_HARA_ARCHIVE" \
+                            >"$install_log" 2>&1
+                        retry_status=$?
+                        if [ "$retry_status" -eq 0 ]; then
+                            rm -f "$install_log"
+                            diag "reinstalled workspace Hara package after stale registration repair"
+                            install_status=0
+                        else
+                            cat "$install_log" >&2
+                            if [ ! -e "$registration" ]; then
+                                mv "$stale_backup" "$registration" 2>/dev/null || true
+                            fi
+                            rm -f "$install_log"
+                            install_status="$retry_status"
+                        fi
+                    else
+                        cat "$install_log" >&2
+                        echo "Hara workspace package registration repair failed: $registration" >&2
+                        rm -f "$install_log"
+                    fi
+                    ;;
+                *)
+                    cat "$install_log" >&2
+                    rm -f "$install_log"
+                    ;;
+            esac
+        fi
+        if [ "$install_status" -ne 0 ]; then
             echo "Hara workspace package installation failed: $CURRENT_HARA_ARCHIVE" >&2
             exit 1
         fi
