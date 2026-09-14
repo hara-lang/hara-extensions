@@ -151,7 +151,8 @@ _project-native-state:
 	  test "$(NATIVE_CHECK_MODE)" != check; \
 	  exit 0; \
 	fi; \
-	newer="$$(find "$$native_root/core/rust" -type f \
+	newer="$$(find "$$native_root/core/rust" \
+	  -path "$$native_root/core/rust/target" -prune -o -type f \
 	  \( -name '*.rs' -o -name Cargo.toml -o -name Cargo.lock \) \
 	  -newer "$$host" -print -quit)"; \
 	dirty="$$(git -C "$$native_root" status --porcelain -- core/rust 2>/dev/null || true)"; \
